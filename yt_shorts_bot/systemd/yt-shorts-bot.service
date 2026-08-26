@@ -1,0 +1,26 @@
+[Unit]
+Description=24/7 YouTube Shorts Automation Bot (Clip Farming, CPU Transcription, R2 & YouTube Upload)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/yt_shorts_bot
+Environment="PATH=/opt/yt_shorts_bot/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/yt_shorts_bot/.venv/bin/python -m yt_shorts_bot.main --mode scheduler --interval 2
+Restart=always
+RestartSec=30s
+StandardOutput=append:/var/log/yt_shorts_bot.log
+StandardError=append:/var/log/yt_shorts_bot.err.log
+LimitNOFILE=65536
+
+# Security Hardening
+ProtectSystem=full
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

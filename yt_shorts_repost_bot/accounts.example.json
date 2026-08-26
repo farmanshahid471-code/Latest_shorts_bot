@@ -1,0 +1,36 @@
+{
+  "_comment": "Copy to ignored accounts.json. Use only sources you own/license. Connect/Test fills the immutable destination channel ID used by the mandatory safety lock.",
+  "accounts": [
+    {
+      "name": "Comedy",
+      "client_secret": "accounts/comedy/client_secret.json",
+      "token": "accounts/comedy/token.json",
+      "target_channels": [
+        "https://www.youtube.com/@OwnedComedySource/shorts"
+      ],
+      "connected_channel": "My Comedy Channel",
+      "connected_channel_id": "UC_REPLACE_AFTER_CONNECT",
+      "expected_channel": "My Comedy Channel",
+      "max_daily_uploads": 6,
+      "max_shorts_per_channel_cycle": 2,
+      "process_mode": "render",
+      "aspect": "auto",
+      "fill": "crop",
+      "subtitles_enabled": false,
+      "watermark": "SUBSCRIBE FOR LAUGHS",
+      "watermark_enabled": true,
+      "top_watermark": "COMEDY CLIPS",
+      "top_watermark_enabled": true,
+      "title_prefix": "",
+      "title_hashtags": "comedy,funny",
+      "selection_order": "newest",
+      "min_minutes_between_uploads": 60,
+      "posting_timezone": "America/Los_Angeles",
+      "posting_start_time": "05:00",
+      "posting_end_time": "17:00",
+      "delete_after_upload": false,
+      "delete_r2_after_upload": false,
+      "enabled": true
+    }
+  ]
+}

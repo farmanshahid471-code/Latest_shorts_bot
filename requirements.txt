@@ -1,0 +1,15 @@
+# Runtime dependencies tested together in August 2026.
+yt-dlp>=2026.8.19,<2027
+faster-whisper>=1.2.1,<2
+numpy>=1.26.4,<3
+boto3>=1.43.0,<2
+google-api-python-client>=2.199.0,<3
+google-auth-oauthlib>=1.4.0,<2
+google-auth-httplib2>=0.4.1,<1
+python-dotenv>=1.2.0,<2
+tzdata>=2025.2,<2027
+pillow>=12.0,<13
+tqdm>=4.70,<5
+requests>=2.32,<3
+tabulate>=0.10,<1
+flask>=3.1,<4

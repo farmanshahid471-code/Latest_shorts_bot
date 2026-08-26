@@ -1,0 +1,13 @@
+# Never render credential/runtime contents in patches. These paths are also
+# ignored and removed from the current index; attributes protect deletion diffs.
+**/.env -diff
+**/accounts.json -diff
+accounts.fixed.json -diff
+**/client_secret*.json -diff
+**/token*.json -diff
+**/cookies*.txt -diff
+**/*.log -diff
+**/*.db -diff
+**/temp_clips/** -diff
+**/finished_shorts/** -diff
+**/ffmpeg/bin/** -diff
