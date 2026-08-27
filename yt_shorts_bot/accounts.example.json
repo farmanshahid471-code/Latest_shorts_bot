@@ -1,0 +1,35 @@
+{
+  "_comment": "Copy to ignored accounts.json. One entry is one destination channel. Upload the OAuth client and use Connect/Test in that tab; the panel fills connected_channel/id and the mandatory safety lock.",
+  "accounts": [
+    {
+      "name": "Gaming",
+      "client_secret": "accounts/gaming/client_secret.json",
+      "token": "accounts/gaming/token.json",
+      "target_channels": [
+        "https://www.youtube.com/@OwnedGamingSource"
+      ],
+      "connected_channel": "My Gaming Channel",
+      "connected_channel_id": "UC_REPLACE_AFTER_CONNECT",
+      "expected_channel": "My Gaming Channel",
+      "max_daily_uploads": 6,
+      "aspect": "9:16",
+      "fill": "blur",
+      "shorts_per_video": 1,
+      "subtitles_enabled": true,
+      "watermark": "LIKE & SUBSCRIBE",
+      "watermark_enabled": true,
+      "top_watermark": "GAMING CLIPS",
+      "top_watermark_enabled": true,
+      "title_prefix": "",
+      "title_hashtags": "gaming,minecraft",
+      "selection_order": "newest",
+      "min_minutes_between_uploads": 60,
+      "posting_timezone": "America/Los_Angeles",
+      "posting_start_time": "05:00",
+      "posting_end_time": "17:00",
+      "delete_after_upload": false,
+      "delete_r2_after_upload": false,
+      "enabled": true
+    }
+  ]
+}

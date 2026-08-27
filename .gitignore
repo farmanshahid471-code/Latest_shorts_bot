@@ -1,0 +1,62 @@
+# Python / tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# JavaScript helper installs
+node_modules/
+
+# Local configuration and account data
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+accounts.fixed.json
+**/accounts.json
+**/accounts/*/
+
+# Channel provisioner: local account list, progress state, downloaded secrets
+provision/accounts.txt
+provision/state.json
+provision/downloads/
+
+# OAuth credentials, login cookies, and tokens
+**/client_secret*.json
+**/token*.json
+**/cookies*.txt
+
+# Runtime state and logs
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+*.log.*
+
+# Generated/downloaded media
+uploads/
+**/temp_clips/
+**/finished_shorts/
+*.part
+*.part-*
+
+# Downloaded platform binaries (setup scripts recreate these)
+**/ffmpeg/bin/
+ffmpeg.zip
+
+# Test output frames/videos
+_tests/*.mp4
+_tests/f*.png
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.sudo_as_admin_successful
+*.zip

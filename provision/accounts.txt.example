@@ -1,0 +1,8 @@
+# Copy this file to accounts.txt (same folder) and list one account per line:
+#   name = email
+# 'name' is the bot tab/folder name (e.g. gaming). 'email' is that channel's
+# own Google account. Lines starting with # are ignored.
+#
+# Example:
+# gaming = channel.gaming01@gmail.com
+# comedy = channel.comedy02@gmail.com
