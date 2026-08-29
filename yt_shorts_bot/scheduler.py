@@ -13,6 +13,7 @@ from dotenv import dotenv_values
 
 from .config import (
     ACCOUNTS,
+    CANDIDATE_ATTEMPTS_PER_CHANNEL,
     CYCLE_INTERVAL_HOURS,
     DELETE_AFTER_UPLOAD,
     DELETE_R2_AFTER_UPLOAD,
@@ -25,7 +26,7 @@ from .config import (
     _ENV_FILE,
     logger,
 )
-from .fetcher import YouTubeFetcher
+from .fetcher import YouTubeFetcher, is_permanent_source_failure
 from .hashtags import save_metadata_sidecar, srt_to_text
 from .models import StateDB
 from .pathutils import safe_account_slug
@@ -136,6 +137,11 @@ class ShortsBotScheduler:
                 if self.stop_event.is_set():
                     break
                 if not account.get("enabled", True):
+                    logger.info(
+                        "[%s] Account is disabled; skipping. Enable it in the panel to "
+                        "include it in automatic cycles.",
+                        account.get("name"),
+                    )
                     continue
                 try:
                     total_uploaded += self._run_cycle_for_account(account)
@@ -174,6 +180,13 @@ class ShortsBotScheduler:
         fill = account.get("fill")
         shorts_per_video = min(20, max(1, int(account.get("shorts_per_video") or SHORTS_PER_VIDEO)))
         min_gap = max(0, int(account.get("min_minutes_between_uploads") or 0))
+        max_candidate_attempts = max(
+            1,
+            int(
+                account.get("candidate_attempts_per_channel")
+                or CANDIDATE_ATTEMPTS_PER_CHANNEL
+            ),
+        )
         subtitles_enabled = bool(account.get("subtitles_enabled", True))
         expected_channel = str(
             account.get("expected_channel") or account.get("connected_channel") or ""
@@ -206,9 +219,22 @@ class ShortsBotScheduler:
         for channel_url in channels:
             if self.stop_event.is_set():
                 break
-            can_upload, _remaining = self.state_db.can_upload_today(max_daily, name)
+            can_upload, remaining = self.state_db.can_upload_today(max_daily, name)
             if not can_upload:
+                logger.warning(
+                    "[%s] Rolling 24-hour upload cap reached (max %d/24h); account paused "
+                    "until an older upload ages out. %s",
+                    name,
+                    max_daily,
+                    channel_url,
+                )
                 break
+            logger.info(
+                "[%s] %d of %d upload slot(s) remain in the rolling 24-hour window.",
+                name,
+                remaining,
+                max_daily,
+            )
             order = str(account.get("selection_order") or SELECTION_ORDER).lower()
             if order not in ("newest", "oldest", "random"):
                 order = "newest"
@@ -221,7 +247,10 @@ class ShortsBotScheduler:
             scanned_total = len(videos)
             skipped_uploaded = 0
             skipped_claimed = 0
+            attempts = 0
             for video in videos:
+                if self.stop_event.is_set():
+                    break
                 video_id = video["video_id"]
                 if self.state_db.is_video_processed(video_id, account=name):
                     skipped_uploaded += 1
@@ -238,9 +267,11 @@ class ShortsBotScheduler:
                 if not claim:
                     skipped_claimed += 1
                     continue
+                attempts += 1
                 logger.info(
                     "[%s] Picked candidate %s ('%s', %ss) - %d already uploaded, "
-                    "%d held by an active claim, %d remaining in window.",
+                    "%d held by an active claim, %d remaining in window. "
+                    "(attempt %d of %d this cycle)",
                     name,
                     video_id,
                     video.get("title", ""),
@@ -248,7 +279,10 @@ class ShortsBotScheduler:
                     skipped_uploaded,
                     skipped_claimed,
                     max(0, scanned_total - skipped_uploaded - skipped_claimed - 1),
+                    attempts,
+                    max_candidate_attempts,
                 )
+                handled = False
                 try:
                     if not self._wait_for_upload_gap(name, min_gap):
                         break
@@ -298,23 +332,58 @@ class ShortsBotScheduler:
                             account.get("delete_r2_after_upload", DELETE_R2_AFTER_UPLOAD)
                         ),
                         subtitles_enabled=subtitles_enabled,
+                        min_gap_minutes=min_gap,
                         expected_channel=expected_channel,
                         expected_channel_id=expected_channel_id,
                     )
+                    handled = True
                 except Exception as exc:
-                    logger.exception("[%s] Failed to process %s: %s", name, video["url"], exc)
-                    self.state_db.record_video_state(
-                        video_id=video_id,
-                        video_url=video["url"],
-                        title=video["title"],
-                        status="PROCESSING_FAILED",
-                        error_msg=str(exc),
-                        account=name,
-                    )
+                    if is_permanent_source_failure(exc):
+                        # Age-restricted / removed / region-blocked videos can
+                        # never succeed. Mark them terminally SKIPPED instead of
+                        # retrying them forever, then try the next candidate.
+                        logger.warning(
+                            "[%s] %s ('%s') can never be clipped: %s. Marking SKIPPED "
+                            "and moving to the next candidate.",
+                            name,
+                            video_id,
+                            video.get("title", ""),
+                            exc,
+                        )
+                        self.state_db.record_video_state(
+                            video_id=video_id,
+                            video_url=video["url"],
+                            title=video["title"],
+                            status="SKIPPED",
+                            error_msg=str(exc)[:500],
+                            account=name,
+                        )
+                    else:
+                        logger.exception("[%s] Failed to process %s: %s", name, video["url"], exc)
+                        self.state_db.record_video_state(
+                            video_id=video_id,
+                            video_url=video["url"],
+                            title=video["title"],
+                            status="PROCESSING_FAILED",
+                            error_msg=str(exc)[:500],
+                            account=name,
+                        )
                 finally:
                     self.state_db.release_video_claim(video_id, name, claim)
-                # Natural pacing: one source video from each source channel/cycle.
-                break
+                if handled:
+                    # Natural pacing: one source video from each source channel/cycle.
+                    break
+                # The candidate failed: try the NEXT unprocessed one this cycle
+                # instead of wasting the whole hour on one poisoned video.
+                if attempts >= max_candidate_attempts:
+                    logger.warning(
+                        "[%s] %d candidate attempt(s) failed on %s this cycle; "
+                        "pausing until the next cycle.",
+                        name,
+                        attempts,
+                        channel_url,
+                    )
+                    break
             else:
                 # The loop ended without picking a video: every candidate in the
                 # scanned window is already handled. Say so instead of staying silent.
@@ -340,6 +409,13 @@ class ShortsBotScheduler:
                         )
 
         return uploaded_count
+
+    def _minutes_since_last_upload(self, account: str) -> float:
+        """Minutes since this account's last REAL upload; infinity if none."""
+        last_upload = self.state_db.get_last_upload_time(account)
+        if not last_upload:
+            return float("inf")
+        return (datetime.now(timezone.utc) - last_upload).total_seconds() / 60.0
 
     def _wait_for_upload_gap(self, account: str, min_gap_minutes: int) -> bool:
         if min_gap_minutes <= 0:
@@ -404,6 +480,7 @@ class ShortsBotScheduler:
         delete_after_upload: bool = False,
         delete_r2_after_upload: bool = False,
         subtitles_enabled: Optional[bool] = None,
+        min_gap_minutes: int = 0,
         expected_channel: Optional[str] = None,
         expected_channel_id: Optional[str] = None,
     ) -> int:
@@ -422,6 +499,26 @@ class ShortsBotScheduler:
             part_ids.append(part_id)
             if self.state_db.is_video_processed(part_id, account=account):
                 continue
+            # Burst guard: the min-upload gap must hold between EVERY upload,
+            # not just between source videos. Without this, a multi-part video
+            # uploaded all its parts back-to-back within minutes. Remaining
+            # parts stay unprocessed (retryable) and resume in a later cycle.
+            if (
+                index > 1
+                and min_gap_minutes > 0
+                and self._minutes_since_last_upload(account) < min_gap_minutes
+            ):
+                logger.info(
+                    "[%s] Deferring %d remaining part(s) of %s to a later cycle: "
+                    "min_minutes_between_uploads=%d has not elapsed since the last "
+                    "upload (%.1f min ago). Parts already uploaded stay done.",
+                    account,
+                    total - index + 1,
+                    video_id,
+                    min_gap_minutes,
+                    self._minutes_since_last_upload(account),
+                )
+                break
             raw_path: Optional[Path] = None
             processed_path: Optional[Path] = None
             srt_path: Optional[Path] = None

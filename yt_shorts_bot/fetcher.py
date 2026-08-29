@@ -37,6 +37,43 @@ from .config import (
     logger,
 )
 
+# yt-dlp messages meaning the SOURCE video can never be clipped, no matter how
+# many times it is retried (age-restricted, removed, private, region/copyright
+# blocked). Such videos are marked SKIPPED so the scheduler stops wasting
+# cycles on them. Deliberately NOT in this list: "This live event will begin
+# in ..." (upcoming streams DO become clip-able VODs later) and bot/429 walls
+# (transient).
+PERMANENT_SOURCE_FAILURE_MARKERS: tuple = (
+    "sign in to confirm your age",
+    "age-restricted",
+    "this video is not available",
+    "video unavailable",
+    "private video",
+    "has been removed by the uploader",
+    "not available in your country",
+    "made this video available in your country",
+    "has not made this video available",
+    "blocked it in your country",
+    "blocked it on copyright grounds",
+    "account associated with this video has been terminated",
+    "no longer available due to a copyright claim",
+    "this video has been removed for violating",
+)
+
+
+def is_permanent_source_failure(error: object) -> bool:
+    """True when retrying this source video can never succeed."""
+    text = str(error).lower()
+    return any(marker in text for marker in PERMANENT_SOURCE_FAILURE_MARKERS)
+
+
+# Flat-listing live_status values that are never clip-able right now: a live
+# edge cannot be seeked, an upcoming premiere has no media, and post_live is a
+# placeholder while YouTube processes the VOD.
+LIVE_OR_UPCOMING_STATUSES: frozenset = frozenset(
+    {"is_live", "is_upcoming", "post_live", "premiering"}
+)
+
 
 class YouTubeFetcher:
     """
@@ -258,6 +295,8 @@ class YouTubeFetcher:
         }
 
         videos = []
+        skipped_live = 0
+        skipped_short = 0
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 res = ydl.extract_info(url, download=False)
@@ -271,24 +310,59 @@ class YouTubeFetcher:
                     v_id = entry.get("id")
                     if not v_id:
                         continue
+                    title = entry.get("title", f"Video {v_id}")
+                    # Never pick something that is not a finished, seekable video:
+                    # still-airing streams, upcoming premieres/live events, and
+                    # post-live placeholders cannot be clipped and only waste the
+                    # whole cycle when picked as the newest candidate.
+                    live_status = str(entry.get("live_status") or "").strip().lower()
+                    if live_status in LIVE_OR_UPCOMING_STATUSES:
+                        skipped_live += 1
+                        logger.debug(
+                            "Skipping video '%s' (%s) - live status '%s' (not clip-able yet)",
+                            title, v_id, live_status,
+                        )
+                        continue
                     v_url = entry.get("webpage_url") or entry.get("url") or ""
                     if not str(v_url).startswith(("http://", "https://")):
                         v_url = f"https://www.youtube.com/watch?v={v_id}"
                     duration = entry.get("duration", 0) or 0
+                    if duration <= 0:
+                        # Flat listings carry a duration for every normal upload.
+                        # Zero/none means "not a watchable video yet" (upcoming
+                        # premiere or scheduled live stream). Picking it just
+                        # fails at metadata extraction ("This live event will
+                        # begin in ...").
+                        skipped_live += 1
+                        logger.debug(
+                            "Skipping video '%s' (%s) - no duration yet (upcoming/live)",
+                            title, v_id,
+                        )
+                        continue
                     # Ignore existing YouTube Shorts (< 60s) or extremely short videos (< 45s)
-                    if 0 < duration < 60:
-                        logger.debug(f"Skipping video '{entry.get('title')}' - already a short ({duration}s)")
+                    if duration < 60:
+                        skipped_short += 1
+                        logger.debug(f"Skipping video '{title}' - already a short ({duration}s)")
                         continue
 
                     videos.append({
                         "video_id": v_id,
                         "url": v_url,
-                        "title": entry.get("title", f"Video {v_id}"),
+                        "title": title,
                         "duration": duration,
                         "channel": channel_url,
                     })
         except Exception as e:
             logger.error(f"Error listing channel {channel_url}: {e}")
+
+        if skipped_live or skipped_short:
+            logger.info(
+                "Candidate filter for %s: skipped %d live/upcoming/no-duration and "
+                "%d already-Shorts entries.",
+                channel_url,
+                skipped_live,
+                skipped_short,
+            )
 
         # The /videos tab always arrives newest-first. Apply the order HERE (not
         # in the scheduler) so every caller gets the same guaranteed ordering.
@@ -309,9 +383,21 @@ class YouTubeFetcher:
 
     @staticmethod
     def _is_bot_check_error(error: Exception) -> bool:
-        """True if yt-dlp hit YouTube's 'Sign in to confirm you're not a bot' wall."""
-        text = str(error)
-        return "Sign in to confirm" in text or "not a bot" in text or "cookies" in text.lower() and "bot" in text.lower()
+        """True ONLY for YouTube's 'Sign in to confirm you're not a bot' wall.
+
+        Deliberately does NOT match 'Sign in to confirm your age' - that is an
+        age restriction, which needs different advice (see _is_age_gate_error).
+        Both start with 'Sign in to confirm', so a naive substring check used
+        to mislabel age-gates as bot walls.
+        """
+        text = str(error).lower()
+        return "not a bot" in text
+
+    @staticmethod
+    def _is_age_gate_error(error: Exception) -> bool:
+        """True if YouTube demands an age-verified (18+) sign-in for a video."""
+        text = str(error).lower()
+        return "confirm your age" in text or "age-restricted" in text
 
     @staticmethod
     def _ensure_not_live(info: Dict[str, Any]) -> None:
@@ -351,7 +437,15 @@ class YouTubeFetcher:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
         except Exception as e:
-            if self._is_bot_check_error(e):
+            if self._is_age_gate_error(e):
+                logger.error(
+                    "This video is AGE-RESTRICTED ('Sign in to confirm your age'). Cookies "
+                    "unlock it ONLY when exported from a Google account with verified 18+ age, "
+                    "and they expire quickly - re-export cookies.txt regularly. The scheduler "
+                    "marks repeatedly age-gated videos as SKIPPED so other candidates still "
+                    "get processed."
+                )
+            elif self._is_bot_check_error(e):
                 logger.error(
                     "YouTube blocked the request with 'Sign in to confirm you're not a bot'. "
                     "Fix: set YT_COOKIES_FILE (exported cookies.txt) or YT_COOKIES_FROM_BROWSER "

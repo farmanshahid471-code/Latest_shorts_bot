@@ -338,6 +338,15 @@ SELECTION_ORDER: str = os.getenv("SELECTION_ORDER", "newest").strip().lower()
 if SELECTION_ORDER not in ("newest", "oldest", "random"):
     SELECTION_ORDER = "newest"
 
+# --- CANDIDATE RETRIES PER CYCLE ---
+# If the picked candidate video cannot be processed (age-restricted, region
+# block, transient download error...), older versions wasted the ENTIRE cycle
+# on that one video and the account posted nothing. Now the cycle moves on to
+# the next unprocessed candidate - this caps how many candidates one source
+# channel may try per cycle. Videos that can never succeed are marked SKIPPED
+# permanently instead of being retried forever.
+CANDIDATE_ATTEMPTS_PER_CHANNEL: int = max(1, min(10, int(os.getenv("CANDIDATE_ATTEMPTS_PER_CHANNEL", "3"))))
+
 # --- DELETE AFTER UPLOAD ---
 # DELETE_AFTER_UPLOAD = "true" -> delete the local finished_shorts copy (+ .txt
 # sidecar) as soon as the video is successfully uploaded to YouTube.
