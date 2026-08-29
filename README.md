@@ -131,8 +131,12 @@ pacing. Disable an account to exclude it; **Stop Scheduler** stops all tabs.
 ## Clip-bot pipeline
 
 ```text
-channel scan (deep window, newest/oldest/random order)
+channel scan (deep window, newest/oldest/random order;
+              live/upcoming streams and existing Shorts filtered out)
   -> skip videos already uploaded, pick the FIRST unprocessed one
+     (un-clip-able videos - age-restricted/removed/region-blocked -
+      are permanently SKIPPED; on failure the cycle tries the NEXT
+      candidate, up to CANDIDATE_ATTEMPTS_PER_CHANNEL)
   -> best 15-20s moment:
        combined: Most Replayed heatmap + audio excitement
        (loud & high-pitched voice). Either signal is used when the
@@ -149,7 +153,10 @@ channel scan (deep window, newest/oldest/random order)
 ```
 
 Multiple windows can be selected from one source. Completed parts are skipped on
-retry, while failed/quota-waiting parts remain retryable.
+retry, while failed/quota-waiting parts remain retryable. The
+`min_minutes_between_uploads` gap also applies BETWEEN parts of one video, so a
+multi-part video can never burst-upload all its parts at once - remaining parts
+resume automatically in later cycles.
 
 ## Repost-bot pipeline
 

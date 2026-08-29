@@ -1,20 +1,25 @@
+"""OAuth loopback flow tests.
+
+Current design: oauthlib >= 3.2 rejects ANY non-HTTPS callback (including the
+standard loopback redirect http://localhost:PORT/) unless the global
+OAUTHLIB_INSECURE_TRANSPORT env var is set. Instead of mutating global env, the
+uploader presents the callback to oauthlib as https://localhost - nothing is
+ever fetched from it; only the ?code/state params are parsed before the code
+is exchanged with Google over the real HTTPS token endpoint.
+"""
 from __future__ import annotations
 
 import os
 import threading
+import time
+from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import pytest
 
-from yt_shorts_bot.uploader import (
-    YouTubeUploader as ClipUploader,
-    allow_loopback_oauth_transport as clip_allow,
-)
-from yt_shorts_repost_bot.uploader import (
-    YouTubeUploader as RepostUploader,
-    allow_loopback_oauth_transport as repost_allow,
-)
+from yt_shorts_bot.uploader import YouTubeUploader as ClipUploader
+from yt_shorts_repost_bot.uploader import YouTubeUploader as RepostUploader
 
 
 LOOPBACK_CALLBACK = "http://localhost:54321/?code=oauth-code&state=oauth-state"
@@ -26,26 +31,21 @@ def _oauthlib_parse(uri: str, state: str = "oauth-state"):
     return parse_authorization_code_response(uri, state=state)
 
 
-@pytest.mark.parametrize("allow", [clip_allow, repost_allow])
-def test_loopback_http_callback_is_accepted_only_inside_helper(allow, monkeypatch):
+def test_oauthlib_rejects_plain_http_loopback(monkeypatch):
+    """This is why the code rewrites the loopback callback to https."""
     monkeypatch.delenv("OAUTHLIB_INSECURE_TRANSPORT", raising=False)
     from oauthlib.oauth2.rfc6749.errors import InsecureTransportError
 
     with pytest.raises(InsecureTransportError):
         _oauthlib_parse(LOOPBACK_CALLBACK)
 
-    with allow():
-        parsed = _oauthlib_parse(LOOPBACK_CALLBACK)
+
+def test_rewritten_https_loopback_parses_without_env_hacks(monkeypatch):
+    """The https-rewritten loopback URL parses cleanly with NO insecure env."""
+    monkeypatch.delenv("OAUTHLIB_INSECURE_TRANSPORT", raising=False)
+    parsed = _oauthlib_parse(LOOPBACK_CALLBACK.replace("http://", "https://"))
     assert parsed["code"] == "oauth-code"
     assert "OAUTHLIB_INSECURE_TRANSPORT" not in os.environ
-
-
-@pytest.mark.parametrize("allow", [clip_allow, repost_allow])
-def test_loopback_helper_restores_previous_env_value(allow, monkeypatch):
-    monkeypatch.setenv("OAUTHLIB_INSECURE_TRANSPORT", "keep-me")
-    with allow():
-        assert os.environ["OAUTHLIB_INSECURE_TRANSPORT"] == "1"
-    assert os.environ["OAUTHLIB_INSECURE_TRANSPORT"] == "keep-me"
 
 
 class _FakeFlow:
@@ -58,13 +58,9 @@ class _FakeFlow:
         return "https://accounts.google.com/o/oauth2/auth?dummy=1", "state"
 
     def fetch_token(self, authorization_response=None):
-        from oauthlib.oauth2.rfc6749.errors import InsecureTransportError
         from oauthlib.oauth2.rfc6749.parameters import parse_authorization_code_response
 
-        try:
-            parse_authorization_code_response(authorization_response, state="xyz")
-        except InsecureTransportError as exc:
-            raise RuntimeError(str(exc)) from exc
+        parse_authorization_code_response(authorization_response, state="xyz")
         self.authorization_response = authorization_response
 
 
@@ -75,7 +71,7 @@ class _FakeFlow:
         (RepostUploader, "yt_shorts_repost_bot.uploader.webbrowser.open"),
     ],
 )
-def test_run_auth_flow_accepts_http_localhost_callback(
+def test_run_auth_flow_rewrites_loopback_callback_to_https(
     monkeypatch, uploader_cls, webbrowser_target
 ):
     monkeypatch.delenv("OAUTHLIB_INSECURE_TRANSPORT", raising=False)
@@ -84,13 +80,27 @@ def test_run_auth_flow_accepts_http_localhost_callback(
     def open_and_callback(_url):
         def hit():
             parsed = urlparse(flow.redirect_uri)
-            urlopen(f"http://127.0.0.1:{parsed.port}/?code=abc&state=xyz")
+            deadline = time.monotonic() + 10
+            # The local OAuth server starts listening a beat after the browser
+            # is (mock-)opened; retry until the callback is accepted.
+            while time.monotonic() < deadline:
+                try:
+                    urlopen(
+                        f"http://127.0.0.1:{parsed.port}/?code=abc&state=xyz",
+                        timeout=2,
+                    )
+                    return
+                except URLError:
+                    time.sleep(0.05)
 
         threading.Thread(target=hit, daemon=True).start()
 
     monkeypatch.setattr(webbrowser_target, open_and_callback)
     credentials = uploader_cls._run_auth_flow(flow)
     assert credentials is flow.credentials
-    assert flow.authorization_response.startswith("http://localhost:")
+    # On the wire the callback is http://localhost:PORT, but oauthlib is given
+    # the https presentation (which needs no insecure-transport allowance).
+    assert flow.redirect_uri.startswith("http://localhost:")
+    assert flow.authorization_response.startswith("https://localhost:")
     assert "code=abc" in flow.authorization_response
     assert "OAUTHLIB_INSECURE_TRANSPORT" not in os.environ

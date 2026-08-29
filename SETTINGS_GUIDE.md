@@ -19,7 +19,7 @@ One tab is one destination channel. Settings are stored in ignored
 | `selection_strategy` | `combined` (Most Replayed + loud/high-pitched voice), `heatmap` (Most Replayed only), or `audio` (voice excitement only). Empty = global default. |
 | `heatmap_weight` | 0-1 weight for Most Replayed when combining (default 0.55). |
 | `audio_excitement_weight` | 0-1 weight for voice excitement when combining (default 0.45). |
-| `min_minutes_between_uploads` | Interruptible delay from the previous real upload. |
+| `min_minutes_between_uploads` | Interruptible delay from the previous real upload. Enforced before a source video's first part AND between its remaining parts — extra parts are deferred to later cycles instead of bursting out together. |
 | `posting_timezone` | IANA US zone used for this tab's automatic posting window. |
 | `posting_start_time` | Inclusive local `HH:MM` opening time. |
 | `posting_end_time` | Exclusive local `HH:MM` closing time. |
@@ -77,6 +77,7 @@ overrides the window; automatic cycles do not.
 DRY_RUN=false
 MAX_DAILY_UPLOADS=10
 CYCLE_INTERVAL_HOURS=2
+CANDIDATE_ATTEMPTS_PER_CHANNEL=3
 KEEP_LOCAL_SHORTS=true
 DELETE_AFTER_UPLOAD=false
 DELETE_R2_AFTER_UPLOAD=false
@@ -88,6 +89,15 @@ the interval before later cycles. Stop interrupts interval and pacing waits.
 YouTube connection cannot freeze a cycle silently. The cycle also logs every
 step: candidates already uploaded (and how many), the video it picks, and how
 long it waits for `min_minutes_between_uploads`.
+
+Candidate resilience: if the picked source video fails (age-restricted, region
+block, transient error), the cycle moves to the NEXT unprocessed candidate —
+up to `CANDIDATE_ATTEMPTS_PER_CHANNEL` per source channel — instead of wasting
+the whole cycle. Videos that can never succeed (age-restricted, removed,
+private, region/copyright-blocked) are marked `SKIPPED` permanently so they
+stop poisoning future cycles; upcoming/live streams are filtered out during
+the channel scan and never become candidates at all. Accounts skipped because
+they are disabled or hit the rolling cap are always logged with the reason.
 
 ### Web UI
 

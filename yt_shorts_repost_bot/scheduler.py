@@ -25,7 +25,7 @@ from .config import (
     _ENV_FILE,
     logger,
 )
-from .fetcher import ShortsFetcher
+from .fetcher import ShortsFetcher, is_permanent_source_failure
 from .models import StateDB
 from .pathutils import safe_account_slug
 from .reprocessor import ShortReprocessor
@@ -280,15 +280,35 @@ class ShortsRepostScheduler:
                     if self._last_upload_result == UPLOAD_QUOTA_REACHED:
                         break
                 except Exception as exc:
-                    logger.exception("[%s] Failed to repost %s: %s", name, short["url"], exc)
-                    self.state_db.record_video_state(
-                        video_id=video_id,
-                        video_url=short["url"],
-                        title=short["title"],
-                        status="PROCESSING_FAILED",
-                        error_msg=str(exc),
-                        account=name,
-                    )
+                    if is_permanent_source_failure(exc):
+                        # Age-restricted / removed / region-blocked sources can
+                        # never succeed - mark them terminally SKIPPED instead of
+                        # retrying them forever, then continue to the next Short.
+                        logger.warning(
+                            "[%s] %s ('%s') can never be reposted: %s. Marking SKIPPED.",
+                            name,
+                            video_id,
+                            short["title"],
+                            exc,
+                        )
+                        self.state_db.record_video_state(
+                            video_id=video_id,
+                            video_url=short["url"],
+                            title=short["title"],
+                            status="SKIPPED",
+                            error_msg=str(exc)[:500],
+                            account=name,
+                        )
+                    else:
+                        logger.exception("[%s] Failed to repost %s: %s", name, short["url"], exc)
+                        self.state_db.record_video_state(
+                            video_id=video_id,
+                            video_url=short["url"],
+                            title=short["title"],
+                            status="PROCESSING_FAILED",
+                            error_msg=str(exc)[:500],
+                            account=name,
+                        )
                 finally:
                     self.state_db.release_video_claim(video_id, name, claim)
 
