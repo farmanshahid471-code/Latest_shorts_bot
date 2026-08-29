@@ -330,6 +330,26 @@ class VideoProcessor:
         except Exception:
             return False
 
+    @staticmethod
+    def _parse_filter_names(output: str) -> set[str]:
+        """
+        Parse `ffmpeg -hide_banner -filters` output into a set of filter names.
+        Tolerates every list format instead of hard-coding the column widths:
+          - FFmpeg <= 7.x:  " TSC drawtext          V->V       ..."
+          - FFmpeg 8.x+:    " T. drawtext          V->V       ..."
+        Every filter row starts with a 2-4 char flags token followed by the
+        filter name, so we simply split on whitespace and validate the tokens.
+        """
+        names: set[str] = set()
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or line.startswith("Filters:") or "->" not in line:
+                continue
+            parts = line.split(maxsplit=2)
+            if len(parts) >= 2 and re.match(r"^[.A-Z|]+$", parts[0]):
+                names.add(parts[1])
+        return names
+
     def _require_ffmpeg_filters(self, required: set[str]) -> None:
         if not FFMPEG_PATH:
             raise RuntimeError(
@@ -345,11 +365,13 @@ class VideoProcessor:
             )
             if result.returncode != 0:
                 raise RuntimeError(f"Could not inspect FFmpeg capabilities: {result.stderr.strip()}")
-            names: set[str] = set()
-            for line in result.stdout.splitlines():
-                match = re.match(r"^\s*[.A-Z|]{3}\s+([A-Za-z0-9_]+)\s", line)
-                if match:
-                    names.add(match.group(1))
+            names = self._parse_filter_names(result.stdout)
+            logger.info(
+                "FFmpeg reported %d filters (detected drawtext=%s) from %s",
+                len(names),
+                "drawtext" in names,
+                FFMPEG_PATH,
+            )
             self._ffmpeg_filters = names
         missing = sorted(required - self._ffmpeg_filters)
         if missing:

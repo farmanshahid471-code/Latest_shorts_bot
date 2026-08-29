@@ -305,6 +305,7 @@ class YouTubeUploader:
         extra_hashtags: str = "",
         title_prefix: Optional[str] = None,
         title_hashtags: str = "",
+        custom_description: str = "",
         smart_titles: Optional[bool] = None,
         content_language: str = "",
     ) -> dict[str, Any]:
@@ -318,6 +319,7 @@ class YouTubeUploader:
             part_label=part_label or "",
             title_prefix=title_prefix,
             title_hashtags=title_hashtags,
+
             smart_titles=smart_titles,
         )
         final_tags = build_hashtags(
@@ -326,6 +328,7 @@ class YouTubeUploader:
             extra_hashtags=extra_hashtags,
             smart_titles=smart_titles,
             title_hashtags=title_hashtags,
+
         )
         tags = [tag.lstrip("#") for tag in final_tags]
         channel_tag = YouTubeUploader._clean_channel_tag(channel_name)
@@ -347,7 +350,7 @@ class YouTubeUploader:
 
         return {
             "title": title,
-            "description": make_description(original_title, original_url, final_tags),
+            "description": make_description(original_title, original_url, final_tags, custom_description=custom_description),
             "tags": capped,
             "categoryId": "24",
             "content_language": YouTubeUploader.resolve_content_language(content_language),
@@ -368,6 +371,7 @@ class YouTubeUploader:
         extra_hashtags: str = "",
         title_prefix: Optional[str] = None,
         title_hashtags: str = "",
+        custom_description: str = "",
         smart_titles: Optional[bool] = None,
         expected_channel: Optional[str] = None,
         expected_channel_id: Optional[str] = None,
@@ -385,6 +389,7 @@ class YouTubeUploader:
             extra_hashtags=extra_hashtags,
             title_prefix=title_prefix,
             title_hashtags=title_hashtags,
+
             smart_titles=smart_titles,
             content_language=content_language,
         )

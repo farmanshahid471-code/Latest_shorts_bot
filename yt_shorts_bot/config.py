@@ -113,9 +113,9 @@ else:  # default 9:16
 ASPECT_RATIO_EXPRESSION: str = SHORT_ASPECT
 
 # Encode quality (higher quality than the old defaults; slower but clips are short)
-VIDEO_CRF: int = int(os.getenv("VIDEO_CRF", "17"))          # lower = better quality (17 = very high quality)
+VIDEO_CRF: int = int(os.getenv("VIDEO_CRF", "15"))          # lower = better quality (17 = very high quality)
 VIDEO_PRESET: str = os.getenv("VIDEO_PRESET", "slow")       # slow = better compression at same quality
-AUDIO_BITRATE: str = os.getenv("AUDIO_BITRATE", "192k")
+AUDIO_BITRATE: str = os.getenv("AUDIO_BITRATE", "320k")
 FFMPEG_TIMEOUT_SEC: int = max(60, int(os.getenv("FFMPEG_TIMEOUT_SEC", "900")))
 
 # --- LOGO / WATERMARK REMOVAL (beta) ---
@@ -187,11 +187,11 @@ SUBTITLE_FONT_NAME: str = os.getenv("SUBTITLE_FONT_NAME", "").strip() or _DEFAUL
 # Windows and makes FFmpeg's subtitle renderer fail (exit 69). Force Arial there.
 if sys.platform.startswith("win") and SUBTITLE_FONT_NAME.strip().lower() == "dejavu sans":
     SUBTITLE_FONT_NAME = "Arial"
-SUBTITLE_FONT_SIZE: int = int(os.getenv("SUBTITLE_FONT_SIZE", "28"))
+SUBTITLE_FONT_SIZE: int = int(os.getenv("SUBTITLE_FONT_SIZE", "20"))
 SUBTITLE_FORCE_STYLE: str = (
     f"Fontname={SUBTITLE_FONT_NAME},Fontsize={SUBTITLE_FONT_SIZE},Bold=1,"
     "PrimaryColour=&H00FFFFFF,SecondaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-    "BorderStyle=1,Outline=3,Shadow=2,Alignment=2,MarginV=85"
+    "BorderStyle=1,Outline=3,Shadow=2,Alignment=2,MarginV=35"
 )
 
 # --- BACKGROUND MUSIC (BGM) DUCKING & MIXING ---
@@ -389,7 +389,9 @@ ACCOUNTS: List[dict] = _load_accounts()
 #           browser: "chrome", "edge", "firefox", "opera", "brave".
 #           NOTE: the browser must be fully CLOSED for Chrome/Edge to work.
 # Leave both empty to run without cookies (may trigger bot checks).
-YT_COOKIES_FILE: str = os.getenv("YT_COOKIES_FILE", "")
+_cookie_env = os.getenv("YT_COOKIES_FILE", "").strip()
+_cookie_local = BASE_DIR / "cookies.txt"
+YT_COOKIES_FILE: str = _cookie_env if _cookie_env else (str(_cookie_local) if _cookie_local.exists() else "")
 YT_COOKIES_FROM_BROWSER: str = os.getenv("YT_COOKIES_FROM_BROWSER", "")
 
 # --- WEB CONTROL PANEL (webui) ---
@@ -410,6 +412,7 @@ MAX_TITLE_HASHTAGS: int = int(os.getenv("MAX_TITLE_HASHTAGS", "4"))
 REACH_HASHTAGS: str = os.getenv("REACH_HASHTAGS", "shorts,viral,fyp,trending")
 EXTRA_HASHTAGS: str = os.getenv("EXTRA_HASHTAGS", "")
 TITLE_PREFIX: str = os.getenv("TITLE_PREFIX", "")
+CUSTOM_DESCRIPTION: str = os.getenv("CUSTOM_DESCRIPTION", "")
 def setup_logging(log_level: int = logging.INFO) -> logging.Logger:
     """
     Configures robust logging with both colored console output and rotating file log.

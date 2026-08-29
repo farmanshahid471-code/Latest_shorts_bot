@@ -261,6 +261,7 @@ class ShortsRepostScheduler:
                         extra_hashtags=str(account.get("extra_hashtags") or "").strip(),
                         title_prefix=account.get("title_prefix"),
                         title_hashtags=str(account.get("title_hashtags") or "").strip(),
+                        custom_description=str(account.get("custom_description") or "").strip(),
                         smart_titles=account.get("smart_titles"),
                         delete_after_upload=bool(
                             account.get("delete_after_upload", DELETE_AFTER_UPLOAD)
@@ -340,6 +341,7 @@ class ShortsRepostScheduler:
         extra_hashtags: str = "",
         title_prefix: Optional[str] = None,
         title_hashtags: str = "",
+        custom_description: str = "",
         smart_titles: Optional[bool] = None,
         delete_after_upload: bool = False,
         delete_r2_after_upload: bool = False,
@@ -416,6 +418,7 @@ class ShortsRepostScheduler:
                 extra_hashtags=extra_hashtags,
                 title_prefix=title_prefix,
                 title_hashtags=title_hashtags,
+                custom_description=custom_description,
                 smart_titles=smart_titles,
                 expected_channel=expected_channel,
                 expected_channel_id=expected_channel_id,

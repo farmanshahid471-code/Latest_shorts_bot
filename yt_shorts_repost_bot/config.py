@@ -82,14 +82,14 @@ else:
     VERTICAL_HEIGHT: int = 1920
 ASPECT_RATIO_EXPRESSION: str = SHORT_ASPECT
 
-VIDEO_CRF: int = int(os.getenv("VIDEO_CRF", "17"))
+VIDEO_CRF: int = int(os.getenv("VIDEO_CRF", "15"))
 VIDEO_PRESET: str = os.getenv("VIDEO_PRESET", "slow")
-AUDIO_BITRATE: str = os.getenv("AUDIO_BITRATE", "192k")
+AUDIO_BITRATE: str = os.getenv("AUDIO_BITRATE", "320k")
 FFMPEG_TIMEOUT_SEC: int = max(60, int(os.getenv("FFMPEG_TIMEOUT_SEC", "900")))
 
 # Copy-mode quality: Shorts are already compressed, so a lighter CRF keeps
 # files reasonable while staying visually identical (default 21).
-VIDEO_CRF_COPY: int = int(os.getenv("VIDEO_CRF_COPY", "21"))
+VIDEO_CRF_COPY: int = int(os.getenv("VIDEO_CRF_COPY", "18"))
 
 # --- SUBTITLES (render mode) ---
 WHISPER_MODEL_SIZE: str = os.getenv("WHISPER_MODEL_SIZE", "base")
@@ -107,11 +107,11 @@ _DEFAULT_FONT = "Arial" if sys.platform.startswith("win") else "DejaVu Sans"
 SUBTITLE_FONT_NAME: str = os.getenv("SUBTITLE_FONT_NAME", "").strip() or _DEFAULT_FONT
 if sys.platform.startswith("win") and SUBTITLE_FONT_NAME.strip().lower() == "dejavu sans":
     SUBTITLE_FONT_NAME = "Arial"
-SUBTITLE_FONT_SIZE: int = int(os.getenv("SUBTITLE_FONT_SIZE", "28"))
+SUBTITLE_FONT_SIZE: int = int(os.getenv("SUBTITLE_FONT_SIZE", "20"))
 SUBTITLE_FORCE_STYLE: str = (
     f"Fontname={SUBTITLE_FONT_NAME},Fontsize={SUBTITLE_FONT_SIZE},Bold=1,"
     "PrimaryColour=&H00FFFFFF,SecondaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-    "BorderStyle=1,Outline=3,Shadow=2,Alignment=2,MarginV=85"
+    "BorderStyle=1,Outline=3,Shadow=2,Alignment=2,MarginV=35"
 )
 
 # --- BACKGROUND MUSIC (render mode) ---
@@ -144,7 +144,9 @@ KEEP_SHORTS_DIR: Path = _resolve_path(os.getenv("KEEP_SHORTS_DIR", BASE_DIR / "f
 KEEP_SHORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- YOUTUBE COOKIES (fixes "Sign in to confirm you're not a bot") ---
-YT_COOKIES_FILE: str = os.getenv("YT_COOKIES_FILE", "")
+_cookie_env = os.getenv("YT_COOKIES_FILE", "").strip()
+_cookie_local = BASE_DIR / "cookies.txt"
+YT_COOKIES_FILE: str = _cookie_env if _cookie_env else (str(_cookie_local) if _cookie_local.exists() else "")
 YT_COOKIES_FROM_BROWSER: str = os.getenv("YT_COOKIES_FROM_BROWSER", "")
 
 # --- CLOUD STORAGE (Cloudflare R2, OPTIONAL - leave placeholders for dry-run) ---
@@ -215,6 +217,7 @@ MAX_TITLE_HASHTAGS: int = int(os.getenv("MAX_TITLE_HASHTAGS", "4"))
 REACH_HASHTAGS: str = os.getenv("REACH_HASHTAGS", "shorts,viral,fyp,trending")
 EXTRA_HASHTAGS: str = os.getenv("EXTRA_HASHTAGS", "")
 TITLE_PREFIX: str = os.getenv("TITLE_PREFIX", "")
+CUSTOM_DESCRIPTION: str = os.getenv("CUSTOM_DESCRIPTION", "")
 
 # --- WEB CONTROL PANEL ---
 WEBUI_HOST: str = os.getenv("WEBUI_HOST", "127.0.0.1")

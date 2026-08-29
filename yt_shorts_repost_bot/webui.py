@@ -240,6 +240,7 @@ def _account_state(a: dict, db: StateDB) -> dict:
         "connected": tk.is_file(),
         "title_prefix": a.get("title_prefix", ""),
         "title_hashtags": a.get("title_hashtags", ""),
+        "custom_description": a.get("custom_description", ""),
         "smart_titles": a.get("smart_titles", None),
         "top_watermark": a.get("top_watermark", ""),
         "top_watermark_enabled": a.get("top_watermark_enabled", None),
@@ -351,7 +352,7 @@ def _clean_account(acc: dict) -> dict:
                 "min_minutes_between_uploads", "posting_timezone", "posting_start_time",
                 "posting_end_time", "delete_after_upload", "delete_r2_after_upload",
                 "watermark", "watermark_enabled", "top_watermark", "top_watermark_enabled",
-                "extra_hashtags", "title_prefix", "title_hashtags", "smart_titles",
+                "extra_hashtags", "title_prefix", "title_hashtags", "smart_titles", "custom_description",
                 "max_shorts_per_channel_cycle", "connected_channel", "connected_channel_id",
                 "subtitles_enabled", "expected_channel"]:
         if opt not in acc:
@@ -650,7 +651,7 @@ def create_app(testing: bool = False) -> Flask:
         for field in [
             "title_prefix", "title_hashtags", "top_watermark", "watermark",
             "aspect", "fill", "expected_channel", "posting_timezone",
-            "posting_start_time", "posting_end_time",
+            "posting_start_time", "posting_end_time", "custom_description"
         ]:
             if field in request.form or (request.is_json and field in (request.json or {})):
                 acc[field] = str(_f(request, field) or "").strip()
@@ -749,7 +750,7 @@ def create_app(testing: bool = False) -> Flask:
                              "min_minutes_between_uploads", "posting_timezone",
                              "posting_start_time", "posting_end_time", "delete_after_upload",
                              "delete_r2_after_upload", "connected_channel", "connected_channel_id",
-                             "subtitles_enabled", "expected_channel"]:
+                             "subtitles_enabled", "expected_channel", "custom_description"]:
                     if keep in old and keep not in acc:
                         acc[keep] = old[keep]
             accounts.append(acc)
@@ -918,6 +919,7 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
     acc_settings = {
         "title_prefix": _aset("title_prefix", ""),
         "title_hashtags": _aset("title_hashtags", ""),
+        "custom_description": _aset("custom_description", ""),
         "smart_titles": _aset("smart_titles", _get_env_setting("ENABLE_SMART_TITLES", "true").lower() == "true", is_bool=True),
         "max_daily_uploads": _aset("max_daily_uploads", _get_env_setting("MAX_DAILY_UPLOADS", str(MAX_DAILY_UPLOADS))),
         "max_shorts_per_channel_cycle": _aset("max_shorts_per_channel_cycle", "2"),
@@ -1148,7 +1150,9 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
               <td><input type="text" name="title_prefix" value="{_esc(acc_settings['title_prefix'])}" style="width:100%;"></td></tr>
           <tr><td style="padding:4px 0;">Title hashtags (all go in the title)</td>
               <td><input type="text" name="title_hashtags" value="{_esc(acc_settings['title_hashtags'])}" placeholder="simpsons, homer, bart" style="width:100%;"></td></tr>
-          <tr><td style="padding:4px 0;">User-controlled title metadata (legacy toggle)</td>
+          <tr><td style="padding:4px 0;">Custom Description</td>
+              <td><input type="text" name="custom_description" value="{_esc(acc_settings['custom_description'])}" placeholder="Link in bio!" style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">Smart Title</td>
               <td><input type="checkbox" name="smart_titles" value="true"{chk(acc_settings['smart_titles'])} style="transform:scale(1.3);"></td></tr>
           <tr><td style="padding:4px 0;">Max uploads / day</td>
               <td><input type="number" name="max_daily_uploads" value="{_esc(acc_settings['max_daily_uploads'])}" min="1" max="30" style="width:100%;"></td></tr>

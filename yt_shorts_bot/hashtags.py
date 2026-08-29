@@ -10,7 +10,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import TITLE_PREFIX, logger
+from .config import TITLE_PREFIX, CUSTOM_DESCRIPTION, logger
 
 STOPWORDS = set(
     """a about after all also am an and any are as at be because been before being
@@ -21,7 +21,8 @@ STOPWORDS = set(
     such than that the their theirs them themselves then there these they this
     those through to too under until up very was we were what when where which
     while who whom why will with you your yours yourself yourselves youtube video
-    watch official channel shorts subscribe clip clips like share comment""".split()
+    watch official channel shorts subscribe clip clips like share comment
+    http https www com org net co uk bit ly href link bio tiktok instagram""".split()
 )
 
 
@@ -101,14 +102,26 @@ def make_catchy_title(
     smart_titles: Optional[bool] = None,
 ) -> str:
     """Build ``prefix + clean source title + explicit hashtags`` within 100 chars."""
-    del transcript_text, extra_hashtags, smart_titles
+    from .config import ENABLE_SMART_TITLES
+    use_smart = smart_titles if smart_titles is not None else ENABLE_SMART_TITLES
+
     info = info or {}
     original = str(info.get("title") or "")
     clean = re.sub(r"#\w+", "", original)
     clean = re.sub(r"[@\[\](){}]", "", clean).strip()
-    if len(clean) > 60:
-        clean = clean[:57].strip() + "..."
 
+    if use_smart and transcript_text:
+        # Generate a smart title based on the spoken transcript!
+        # It takes the first coherent phrase spoken in the clip.
+        text = re.sub(r'\s+', ' ', transcript_text).strip()
+        words = text.split()
+        if len(words) >= 3:
+            take = min(len(words), 8)
+            smart_phrase = " ".join(words[:take]).title()
+            smart_phrase = re.sub(r'[^A-Za-z0-9]+$', '', smart_phrase)
+            if smart_phrase:
+                clean = smart_phrase
+    
     raw_prefix = (
         title_prefix
         if title_prefix is not None
@@ -120,8 +133,13 @@ def make_catchy_title(
     if part_label:
         prefix = f"{prefix}{part_label} - "
 
+    # ONLY use explicit user hashtags (never generate random ones)
     user_tags = [tag.lstrip("#") for tag in _split_tags(title_hashtags)]
     tags_text = " ".join("#" + tag for tag in user_tags)
+
+    if len(clean) > 60:
+        clean = clean[:57].strip() + "..."
+
     tags_part = (" " + tags_text) if tags_text else ""
     if len(prefix) + len(clean) + len(tags_part) > max_len:
         available = max_len - len(prefix) - len(tags_part) - 1
@@ -131,6 +149,7 @@ def make_catchy_title(
             available = max_len - len(prefix) - 1
             clean = clean[: max(0, available - 1)].rstrip() + "…"
             tags_part = ""
+    
     result = f"{prefix}{clean}{tags_part}".strip()
     return result if len(result) <= max_len else result[: max_len - 1].rstrip() + "…"
 
@@ -139,16 +158,27 @@ def make_description(
     original_title: str,
     original_url: str = "",
     hashtags: Optional[list[str]] = None,
+    custom_description: str = "",
 ) -> str:
     """Build a description without exposing the source URL or source hashtags."""
     del original_url
     tag_line = " ".join("#" + tag for tag in (hashtags or []))
     quoted = re.sub(r"#\w+", "", str(original_title or "")).strip()
-    return (
-        f"🎬 High-engagement highlight clip from: {quoted}\n"
-        "💡 Subscribe for daily curated shorts & insights!\n\n"
-        f"{tag_line}"
-    )
+    
+    parts = []
+    desc = custom_description or CUSTOM_DESCRIPTION
+    if desc:
+        parts.append(desc)
+
+    # Global forced disclaimer on ALL shorts
+    parts.append("**Disclaimer:** All rights and credits for the original content go directly to the respective creators. This clip is shared for entertainment purposes under fair use.\n\n**Copyright Disclaimer:** Under Section 107 of the Copyright Act 1976, allowance is made for \"fair use\" for purposes such as criticism, comment, news reporting, and research. Fair use is a use permitted by copyright statute that might otherwise be infringing.")
+        
+    parts.append(f"🎬 High-engagement highlight clip from: {quoted}")
+    parts.append("💡 Subscribe for daily curated shorts & insights!")
+    if tag_line:
+        parts.append(tag_line)
+        
+    return "\n\n".join(parts)
 
 
 def srt_to_text(srt_path) -> str:
