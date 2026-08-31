@@ -252,6 +252,7 @@ def _account_state(a: dict, db: StateDB) -> dict:
         "fill": a.get("fill", ""),
         "max_shorts_per_channel_cycle": a.get("max_shorts_per_channel_cycle", ""),
         "min_minutes_between_uploads": a.get("min_minutes_between_uploads", ""),
+        "spread_uploads_across_window": a.get("spread_uploads_across_window", ""),
         "posting_timezone": a.get("posting_timezone", ""),
         "posting_start_time": a.get("posting_start_time", ""),
         "posting_end_time": a.get("posting_end_time", ""),
@@ -353,6 +354,7 @@ def _clean_account(acc: dict) -> dict:
                 "posting_end_time", "delete_after_upload", "delete_r2_after_upload",
                 "watermark", "watermark_enabled", "top_watermark", "top_watermark_enabled",
                 "extra_hashtags", "title_prefix", "title_hashtags", "smart_titles", "custom_description",
+                "spread_uploads_across_window",
                 "max_shorts_per_channel_cycle", "connected_channel", "connected_channel_id",
                 "subtitles_enabled", "expected_channel"]:
         if opt not in acc:
@@ -360,7 +362,7 @@ def _clean_account(acc: dict) -> dict:
         val = acc[opt]
         if opt in ("watermark_enabled", "top_watermark_enabled", "smart_titles",
                    "delete_after_upload", "delete_r2_after_upload",
-                   "subtitles_enabled"):
+                   "subtitles_enabled", "spread_uploads_across_window"):
             # accept real bools AND the strings "true"/"false"/"0"/"1"
             if isinstance(val, bool):
                 entry[opt] = val
@@ -668,7 +670,7 @@ def create_app(testing: bool = False) -> Flask:
                 except (TypeError, ValueError):
                     pass
         for field in ["smart_titles", "top_watermark_enabled", "watermark_enabled",
-                      "delete_after_upload", "delete_r2_after_upload"]:
+                      "delete_after_upload", "delete_r2_after_upload", "spread_uploads_across_window"]:
             if field in request.form or (request.is_json and field in (request.json or {})):
                 raw = _f(request, field)
                 if isinstance(raw, bool):
@@ -750,7 +752,8 @@ def create_app(testing: bool = False) -> Flask:
                              "min_minutes_between_uploads", "posting_timezone",
                              "posting_start_time", "posting_end_time", "delete_after_upload",
                              "delete_r2_after_upload", "connected_channel", "connected_channel_id",
-                             "subtitles_enabled", "expected_channel", "custom_description"]:
+                             "subtitles_enabled", "expected_channel", "custom_description",
+                             "spread_uploads_across_window"]:
                     if keep in old and keep not in acc:
                         acc[keep] = old[keep]
             accounts.append(acc)
@@ -932,6 +935,7 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
         "aspect": _aset("aspect", "auto"),
         "fill": _aset("fill", _get_env_setting("FILL_MODE", FILL_MODE)),
         "min_minutes_between_uploads": _aset("min_minutes_between_uploads", "0"),
+        "spread_uploads_across_window": _aset("spread_uploads_across_window", False, is_bool=True),
         "posting_timezone": _aset("posting_timezone", ""),
         "posting_start_time": _aset("posting_start_time", ""),
         "posting_end_time": _aset("posting_end_time", ""),
@@ -1166,6 +1170,8 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
               <td><input type="time" name="posting_start_time" value="{_esc(acc_settings['posting_start_time'])}" step="60" style="width:100%;"></td></tr>
           <tr><td style="padding:4px 0;">Posting window ends</td>
               <td><input type="time" name="posting_end_time" value="{_esc(acc_settings['posting_end_time'])}" step="60" style="width:100%;"><div class="hint">Uses the selected local time with daylight-saving changes. Overnight windows are supported. Choose 24/7 and clear both times to disable.</div></td></tr>
+          <tr><td style="padding:4px 0;">Spread uploads across window (YouTube scheduled publishing)</td>
+              <td><input type="checkbox" name="spread_uploads_across_window" value="true"{chk(acc_settings['spread_uploads_across_window'])} style="transform:scale(1.3);"><div class="hint">Shorts upload privately at once; YouTube itself publishes them at times spread evenly from now until the window ends - exact posting times even with the PC off. Local min-gap pacing is skipped while on.</div></td></tr>
           <tr><td style="padding:4px 0;">Top watermark (light text at top)</td>
               <td><input type="text" name="top_watermark" value="{_esc(acc_settings['top_watermark'])}" placeholder="e.g. Simpson Pimp" style="width:100%;"></td></tr>
           <tr><td style="padding:4px 0;">Top watermark on</td>

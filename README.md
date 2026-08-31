@@ -158,6 +158,13 @@ retry, while failed/quota-waiting parts remain retryable. The
 multi-part video can never burst-upload all its parts at once - remaining parts
 resume automatically in later cycles.
 
+Both bots also support **YouTube-side scheduled publishing**: turning on
+*Spread uploads across window* in an account's Settings makes the bot upload
+Shorts privately immediately, with YouTube `publishAt` times spaced evenly from
+*now* until the posting window ends. The local min-gap pacing is then skipped
+and YouTube publishes each Short at its exact scheduled time — even while the
+bot is offline. See `SETTINGS_GUIDE.md` for details and fallbacks.
+
 ## Repost-bot pipeline
 
 ```text

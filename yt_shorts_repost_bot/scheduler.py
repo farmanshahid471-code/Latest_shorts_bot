@@ -4,10 +4,11 @@ from __future__ import annotations
 import shutil
 import signal
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from dotenv import dotenv_values
 
@@ -230,6 +231,14 @@ class ShortsRepostScheduler:
                 ),
             )
             min_gap = max(0, int(account.get("min_minutes_between_uploads") or 0))
+            spread = self._spread_scheduling_enabled(account)
+            if spread:
+                logger.info(
+                    "[%s] Scheduled publishing is on: uploads go up privately and "
+                    "YouTube publishes them at spread-out times inside %s.",
+                    name,
+                    posting_window_label(account),
+                )
             for short in shorts:
                 if self.stop_event.is_set() or attempted >= max_per_channel:
                     break
@@ -241,7 +250,10 @@ class ShortsRepostScheduler:
                     logger.info("[%s] %s is already claimed by another worker.", name, video_id)
                     continue
                 try:
-                    if min_gap > 0 and self._minutes_since_last_upload(name) < min_gap:
+                    # When YouTube-side scheduling is on, the LOCAL gap/pacing
+                    # is unnecessary: posts upload immediately as private and
+                    # YouTube publishes them at the planned times.
+                    if not spread and min_gap > 0 and self._minutes_since_last_upload(name) < min_gap:
                         # Non-blocking pacing: the old code SLEPT inside the cycle
                         # until the gap elapsed, freezing every account queued
                         # behind this one (their windows could close while waiting).
@@ -267,6 +279,11 @@ class ShortsRepostScheduler:
                         fetcher=fetcher,
                         reprocessor=reprocessor,
                         uploader=uploader,
+                        publish_at=(
+                            self._plan_publish_at(account, max_daily)
+                            if spread
+                            else None
+                        ),
                         like_subscribe=None if watermark_enabled is None else bool(watermark_enabled),
                         like_subscribe_text=watermark_text,
                         top_watermark_enabled=None if top_enabled is None else bool(top_enabled),
@@ -336,6 +353,71 @@ class ShortsRepostScheduler:
         return (datetime.now(timezone.utc) - last_upload).total_seconds() / 60.0
 
     @staticmethod
+    def _spread_scheduling_enabled(account: dict) -> bool:
+        """Has this account opted into YouTube-side scheduled publishing?"""
+        raw = account.get("spread_uploads_across_window")
+        if isinstance(raw, bool):
+            on = raw
+        else:
+            on = str(raw or "").strip().lower() in ("true", "on", "1", "yes")
+        if not on:
+            return False
+        start = str(account.get("posting_start_time") or "").strip()
+        end = str(account.get("posting_end_time") or "").strip()
+        return (
+            posting_window_configured(account)
+            and validate_posting_window(account) is None
+            and start != end
+        )
+
+    def _plan_publish_at(
+        self,
+        account: dict,
+        max_daily: int,
+        now_utc: Optional[datetime] = None,
+    ) -> Optional[datetime]:
+        """Plan the YouTube ``publishAt`` instant for the NEXT upload.
+
+        Today's uploads are spaced evenly from the first upload of the day
+        (or ~15 minutes from now) until the posting window ends - so a bot
+        started at 08:00 with a 06:00-17:00 window spreads 08:00 -> 17:00
+        instead of anchoring to 06:00 or skipping uploads. Returns None when
+        no sensible plan exists (callers then upload publicly right away).
+        """
+        if not self._spread_scheduling_enabled(account):
+            return None
+        name = str(account.get("name") or "default").strip()
+        now = now_utc or datetime.now(timezone.utc)
+        zone = ZoneInfo(str(account["posting_timezone"]))
+        local_now = now.astimezone(zone)
+        start_clock = dt_time.fromisoformat(
+            str(account["posting_start_time"]).strip()
+        )
+        end_clock = dt_time.fromisoformat(str(account["posting_end_time"]).strip())
+        end_local = datetime.combine(local_now.date(), end_clock, tzinfo=zone)
+        if start_clock > end_clock and local_now.time() > end_clock:
+            # Overnight window, currently before midnight: the end is tomorrow.
+            end_local += timedelta(days=1)
+        end_utc = end_local.astimezone(timezone.utc)
+
+        used = self.state_db.get_uploads_in_last_24_hours(account=name)
+        first = self.state_db.get_first_upload_time(name)
+        anchor = now + timedelta(minutes=15)
+        if first is not None and first > anchor:
+            anchor = first
+        span = (end_utc - anchor).total_seconds()
+        if span < 10 * 60:
+            return None
+        step = span / max(1, int(max_daily))
+        slot = min(used, max(0, int(max_daily) - 1))
+        publish_at = anchor + timedelta(seconds=step * slot)
+        if publish_at <= now + timedelta(minutes=5):
+            publish_at = now + timedelta(minutes=15)
+        if publish_at > end_utc:
+            return None
+        return publish_at
+
+    @staticmethod
     def _state_for_upload_result(result: Optional[str]) -> str:
         if is_real_upload_id(result):
             return "UPLOADED_YOUTUBE"
@@ -374,6 +456,7 @@ class ShortsRepostScheduler:
         expected_channel_id: Optional[str] = None,
         aspect: Optional[str] = None,
         fill: Optional[str] = None,
+        publish_at: Optional[datetime] = None,
     ) -> bool:
         fetcher = fetcher or ShortsFetcher()
         reprocessor = reprocessor or ShortReprocessor()
@@ -445,6 +528,7 @@ class ShortsRepostScheduler:
                 smart_titles=smart_titles,
                 expected_channel=expected_channel,
                 expected_channel_id=expected_channel_id,
+                publish_at=publish_at,
             )
             self._last_upload_result = short_id
             status = self._state_for_upload_result(short_id)

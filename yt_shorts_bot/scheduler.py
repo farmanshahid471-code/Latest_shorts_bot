@@ -4,10 +4,11 @@ from __future__ import annotations
 import shutil
 import signal
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from dotenv import dotenv_values
 
@@ -180,6 +181,14 @@ class ShortsBotScheduler:
         fill = account.get("fill")
         shorts_per_video = min(20, max(1, int(account.get("shorts_per_video") or SHORTS_PER_VIDEO)))
         min_gap = max(0, int(account.get("min_minutes_between_uploads") or 0))
+        spread = self._spread_scheduling_enabled(account)
+        if spread:
+            logger.info(
+                "[%s] Scheduled publishing is on: uploads go up privately and "
+                "YouTube publishes them at spread-out times inside %s.",
+                name,
+                posting_window_label(account),
+            )
         max_candidate_attempts = max(
             1,
             int(
@@ -284,7 +293,10 @@ class ShortsBotScheduler:
                 )
                 handled = False
                 try:
-                    if not self._wait_for_upload_gap(name, min_gap):
+                    # When YouTube-side scheduling is on, the LOCAL gap/pacing
+                    # is unnecessary: parts upload immediately as private and
+                    # YouTube drips them public at the planned times.
+                    if not spread and not self._wait_for_upload_gap(name, min_gap):
                         break
                     if shorts_per_video > 1:
                         ranked = fetcher.select_top_windows(
@@ -332,7 +344,12 @@ class ShortsBotScheduler:
                             account.get("delete_r2_after_upload", DELETE_R2_AFTER_UPLOAD)
                         ),
                         subtitles_enabled=subtitles_enabled,
-                        min_gap_minutes=min_gap,
+                        min_gap_minutes=0 if spread else min_gap,
+                        publish_time_fn=(
+                            (lambda: self._plan_publish_at(account, max_daily))
+                            if spread
+                            else None
+                        ),
                         expected_channel=expected_channel,
                         expected_channel_id=expected_channel_id,
                     )
@@ -417,6 +434,76 @@ class ShortsBotScheduler:
             return float("inf")
         return (datetime.now(timezone.utc) - last_upload).total_seconds() / 60.0
 
+    @staticmethod
+    def _spread_scheduling_enabled(account: dict) -> bool:
+        """Has this account opted into YouTube-side scheduled publishing?"""
+        raw = account.get("spread_uploads_across_window")
+        if isinstance(raw, bool):
+            on = raw
+        else:
+            on = str(raw or "").strip().lower() in ("true", "on", "1", "yes")
+        if not on:
+            return False
+        # Spreading only makes sense with a real (valid, non-24h) window.
+        start = str(account.get("posting_start_time") or "").strip()
+        end = str(account.get("posting_end_time") or "").strip()
+        return (
+            posting_window_configured(account)
+            and validate_posting_window(account) is None
+            and start != end
+        )
+
+    def _plan_publish_at(
+        self,
+        account: dict,
+        max_daily: int,
+        now_utc: Optional[datetime] = None,
+    ) -> Optional[datetime]:
+        """Plan the YouTube ``publishAt`` instant for the NEXT upload.
+
+        Today's uploads are spaced evenly from the first upload of the day
+        (or ~15 minutes from now) until the posting window ends - so a bot
+        started at 08:00 with a 06:00-17:00 window spreads 08:00 -> 17:00
+        instead of anchoring to 06:00 or skipping uploads. The local upload
+        gap is skipped in this mode: everything is uploaded now, privately,
+        and YouTube itself publishes each part at its planned time.
+
+        Returns None when no sensible plan exists (window over soon, 24h
+        window, setting off) - callers then upload publicly right away.
+        """
+        if not self._spread_scheduling_enabled(account):
+            return None
+        name = str(account.get("name") or "default").strip()
+        now = now_utc or datetime.now(timezone.utc)
+        zone = ZoneInfo(str(account["posting_timezone"]))
+        local_now = now.astimezone(zone)
+        start_clock = dt_time.fromisoformat(
+            str(account["posting_start_time"]).strip()
+        )
+        end_clock = dt_time.fromisoformat(str(account["posting_end_time"]).strip())
+        end_local = datetime.combine(local_now.date(), end_clock, tzinfo=zone)
+        if start_clock > end_clock and local_now.time() > end_clock:
+            # Overnight window, currently before midnight: the end is tomorrow.
+            end_local += timedelta(days=1)
+        end_utc = end_local.astimezone(timezone.utc)
+
+        used = self.state_db.get_uploads_in_last_24_hours(account=name)
+        first = self.state_db.get_first_upload_time(name)
+        anchor = now + timedelta(minutes=15)
+        if first is not None and first > anchor:
+            anchor = first
+        span = (end_utc - anchor).total_seconds()
+        if span < 10 * 60:
+            return None
+        step = span / max(1, int(max_daily))
+        slot = min(used, max(0, int(max_daily) - 1))
+        publish_at = anchor + timedelta(seconds=step * slot)
+        if publish_at <= now + timedelta(minutes=5):
+            publish_at = now + timedelta(minutes=15)
+        if publish_at > end_utc:
+            return None
+        return publish_at
+
     def _wait_for_upload_gap(self, account: str, min_gap_minutes: int) -> bool:
         if min_gap_minutes <= 0:
             return not self.stop_event.is_set()
@@ -481,6 +568,7 @@ class ShortsBotScheduler:
         delete_r2_after_upload: bool = False,
         subtitles_enabled: Optional[bool] = None,
         min_gap_minutes: int = 0,
+        publish_time_fn: Optional[Callable[[], Optional[datetime]]] = None,
         expected_channel: Optional[str] = None,
         expected_channel_id: Optional[str] = None,
     ) -> int:
@@ -594,6 +682,7 @@ class ShortsBotScheduler:
                         if getattr(self.processor, "detected_language_probability", 0.0) >= 0.5
                         else ""
                     ),
+                    publish_at=publish_time_fn() if publish_time_fn else None,
                 )
                 self._last_upload_result = short_id
                 state = self._state_for_upload_result(short_id)

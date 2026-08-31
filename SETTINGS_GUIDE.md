@@ -23,6 +23,7 @@ One tab is one destination channel. Settings are stored in ignored
 | `posting_timezone` | IANA US zone used for this tab's automatic posting window. |
 | `posting_start_time` | Inclusive local `HH:MM` opening time. |
 | `posting_end_time` | Exclusive local `HH:MM` closing time. |
+| `spread_uploads_across_window` | If true, the local `min_minutes_between_uploads` pacing is skipped; Shorts upload privately at once with YouTube `publishAt` times spread from *now* (or today's first upload) until `posting_end_time`. YouTube flips each one public itself — exact spacing even with the PC off. Falls back to immediate public upload when the window is 24/7 or nearly over. Default false. |
 | `title_prefix` | Optional text before the clean source title. |
 | `title_hashtags` | The only hashtags appended to titles/descriptions. |
 | `watermark` | Bottom text in render mode. Empty text stays off. |
@@ -54,6 +55,20 @@ settings fail closed and the account is skipped.
 Start Scheduler and Stop Scheduler are global controls for all enabled tabs.
 Every tab still has an independent posting window. Manual specific-URL processing
 overrides the window; automatic cycles do not.
+
+### Spreading uploads across the window (YouTube scheduled publishing)
+
+With `spread_uploads_across_window` on (Settings checkbox, per account), the bot
+stops waiting between uploads. Each Short is uploaded right away as **private**
+with a YouTube `publishAt` time; YouTube itself publishes it. The times anchor
+at *now* (e.g., a bot started at 08:00 in a 06:00–17:00 window spreads
+08:00→17:00 — nothing is skipped) or at today's first upload, with
+`max_daily_uploads` slots spread to the window end. Because YouTube holds the
+schedule, posts go out at exact spaced times even when the PC is off or the bot
+is stopped. 24/7 windows (empty or equal start/end) can't be spread, and if the
+window is nearly over the upload goes out immediately as public. It also needs
+the OAuth consent screen **Published (not Testing)** — a Testing-screen token
+expires after 7 days, which also blocks scheduled videos from ever publishing.
 
 ## Upload states
 

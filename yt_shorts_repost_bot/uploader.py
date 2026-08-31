@@ -5,6 +5,7 @@ import re
 import socket
 import time
 import webbrowser
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Optional
@@ -333,8 +334,14 @@ class YouTubeUploader:
         smart_titles: Optional[bool] = None,
         expected_channel: Optional[str] = None,
         expected_channel_id: Optional[str] = None,
+        publish_at: Optional[datetime] = None,
     ) -> Optional[str]:
-        """Upload once. Non-upload sentinels never consume quota or mark success."""
+        """Upload once. Non-upload sentinels never consume quota or mark success.
+
+        ``publish_at``: when set (aware datetime), the video is uploaded as
+        PRIVATE with a YouTube-side ``publishAt`` time - YouTube itself makes
+        it public then, so posting times are exact even if the bot is offline.
+        """
         video_path = Path(video_path)
         self.last_metadata = self.generate_short_metadata(
             original_title=original_title,
@@ -422,6 +429,15 @@ class YouTubeUploader:
                 "selfDeclaredMadeForKids": False,
             },
         }
+        if publish_at is not None:
+            pa = publish_at
+            if pa.tzinfo is None:
+                pa = pa.replace(tzinfo=timezone.utc)
+            pa = pa.astimezone(timezone.utc)
+            # YouTube requires privacyStatus=private when publishAt is set;
+            # it flips the video to public itself at that exact time.
+            body["status"]["privacyStatus"] = "private"
+            body["status"]["publishAt"] = pa.strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
             media = MediaFileUpload(
                 str(video_path),
@@ -446,7 +462,15 @@ class YouTubeUploader:
                 account=account,
                 reservation_id=reservation,
             )
-            logger.info("YouTube upload complete: https://www.youtube.com/shorts/%s", short_id)
+            if publish_at is not None:
+                logger.info(
+                    "YouTube upload stored privately; SCHEDULED to go public at %s: "
+                    "https://www.youtube.com/shorts/%s",
+                    body["status"]["publishAt"],
+                    short_id,
+                )
+            else:
+                logger.info("YouTube upload complete: https://www.youtube.com/shorts/%s", short_id)
             return short_id
         except HttpError as exc:
             self.state_db.release_upload_reservation(reservation)

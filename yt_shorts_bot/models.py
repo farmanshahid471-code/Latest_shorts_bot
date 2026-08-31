@@ -378,11 +378,20 @@ class StateDB:
     # ------------------------------------------------------------------
     # Upload quota and atomic reservations
     def get_last_upload_time(self, account: str = "") -> Optional[dt.datetime]:
+        return self._get_upload_time(account, ascending=False)
+
+    def get_first_upload_time(self, account: str = "") -> Optional[dt.datetime]:
+        """Time of the OLDEST real upload in the rolling window, e.g. today's
+        first post. Used to anchor scheduled-publish plans."""
+        return self._get_upload_time(account, ascending=True)
+
+    def _get_upload_time(self, account: str, ascending: bool) -> Optional[dt.datetime]:
+        direction = "ASC" if ascending else "DESC"
         with self._get_connection() as conn:
             row = conn.execute(
-                """
+                f"""
                 SELECT uploaded_at FROM daily_uploads
-                WHERE account = ? ORDER BY datetime(uploaded_at) DESC LIMIT 1
+                WHERE account = ? ORDER BY datetime(uploaded_at) {direction} LIMIT 1
                 """,
                 (account,),
             ).fetchone()
