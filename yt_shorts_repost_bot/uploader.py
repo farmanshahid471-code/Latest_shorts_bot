@@ -138,13 +138,34 @@ class YouTubeUploader:
         flow.fetch_token(authorization_response=response_url)
         return flow.credentials
 
-    def _get_authenticated_service(self, interactive: bool = True) -> Optional[Resource]:
-        if self.youtube_service:
+    def _save_credentials(self, creds: Credentials) -> None:
+        """Persist a newly issued or refreshed token without exposing its contents."""
+        try:
+            self.token_file.parent.mkdir(parents=True, exist_ok=True)
+            self.token_file.write_text(creds.to_json(), encoding="utf-8")
+            logger.info("Saved refreshed OAuth token for this account.")
+        except Exception as exc:
+            logger.warning("Could not save OAuth token: %s", exc)
+
+    def _get_authenticated_service(
+        self,
+        interactive: bool = True,
+        force_refresh: bool = False,
+    ) -> Optional[Resource]:
+        """Return an API client, optionally proving the refresh token works now.
+
+        A normal upload may reuse an already built client.  Scheduler preflight
+        uses ``force_refresh=True`` so a still-live one-hour access token cannot
+        hide an expired/revoked refresh token (notably the seven-day tokens
+        issued while an OAuth consent screen is in Testing).
+        """
+        if self.youtube_service and not force_refresh:
             return self.youtube_service
         self.last_auth_error = ""
         logger.info("OAuth token path for this account: %s", self.token_file)
 
         creds: Optional[Credentials] = None
+        credentials_changed = False
         if self.token_file.is_file():
             try:
                 creds = Credentials.from_authorized_user_file(
@@ -154,17 +175,45 @@ class YouTubeUploader:
                 self.last_auth_error = f"Could not read OAuth token: {exc}"
                 logger.error("%s", self.last_auth_error)
 
+        if creds and force_refresh:
+            if not creds.refresh_token:
+                self.last_auth_error = (
+                    "OAuth token has no refresh token; reconnect this account"
+                )
+                logger.error("%s", self.last_auth_error)
+                creds = None
+            else:
+                try:
+                    logger.info(
+                        "Preflight: forcing a YouTube OAuth refresh to verify the token..."
+                    )
+                    creds.refresh(Request())
+                    credentials_changed = True
+                except Exception as exc:
+                    self.last_auth_error = f"OAuth token refresh failed: {exc}"
+                    logger.error("%s", self.last_auth_error)
+                    creds = None
+
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 try:
                     logger.info("Refreshing expired YouTube OAuth token...")
                     creds.refresh(Request())
+                    credentials_changed = True
                 except Exception as exc:
                     self.last_auth_error = f"OAuth token refresh failed: {exc}"
                     logger.error("%s", self.last_auth_error)
                     creds = None
 
             if not creds:
+                # A non-interactive preflight must fail closed and preserve the
+                # useful refresh error instead of replacing it with a vague one.
+                if not interactive:
+                    if not self.last_auth_error:
+                        self.last_auth_error = (
+                            "OAuth token is missing; reconnect this account"
+                        )
+                    return None
                 if not self.client_secret_file.is_file():
                     self.last_auth_error = (
                         f"OAuth client secret is missing for this account: "
@@ -172,25 +221,19 @@ class YouTubeUploader:
                     )
                     logger.error("%s", self.last_auth_error)
                     return None
-                if not interactive:
-                    self.last_auth_error = "Interactive Google authorization is required"
-                    return None
                 try:
                     flow = InstalledAppFlow.from_client_secrets_file(
                         str(self.client_secret_file), YOUTUBE_SCOPES
                     )
                     creds = self._run_auth_flow(flow)
+                    credentials_changed = True
                 except Exception as exc:
                     self.last_auth_error = f"OAuth authorization failed: {exc}"
                     logger.error("%s", self.last_auth_error)
                     return None
 
-            try:
-                self.token_file.parent.mkdir(parents=True, exist_ok=True)
-                self.token_file.write_text(creds.to_json(), encoding="utf-8")
-                logger.info("Saved refreshed OAuth token for this account.")
-            except Exception as exc:
-                logger.warning("Could not save OAuth token: %s", exc)
+        if credentials_changed:
+            self._save_credentials(creds)
 
         try:
             self.youtube_service = build(
@@ -209,6 +252,64 @@ class YouTubeUploader:
     @staticmethod
     def _normalize_channel_title(value: str) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+    def check_connection(
+        self,
+        expected_channel: str = "",
+        expected_channel_id: str = "",
+    ) -> tuple[bool, str]:
+        """Prove that the refresh token and destination channel work right now.
+
+        Google does not expose an OAuth consent screen's Testing/Published mode
+        or a reliable seven-day countdown in ``token.json``.  The strongest
+        deterministic check is therefore to force a refresh and make a small,
+        read-only YouTube API request before scheduling any work.
+        """
+        service = self._get_authenticated_service(
+            interactive=False,
+            force_refresh=True,
+        )
+        if not service:
+            detail = self.last_auth_error or "OAuth token is unavailable"
+            return False, f"{detail}. Press Connect / Test YouTube to replace it."
+
+        try:
+            response = service.channels().list(part="id,snippet", mine=True).execute()
+            items = response.get("items") or []
+        except Exception as exc:
+            self.last_auth_error = f"YouTube API token check failed: {exc}"
+            logger.error("%s", self.last_auth_error)
+            return False, (
+                f"{self.last_auth_error}. Press Connect / Test YouTube to reconnect."
+            )
+
+        if not items:
+            self.last_auth_error = "Token is valid, but this Google account has no YouTube channel"
+            return False, self.last_auth_error
+
+        actual_titles = [
+            str(item.get("snippet", {}).get("title", "")) for item in items
+        ]
+        actual = ", ".join(title for title in actual_titles if title) or "(untitled channel)"
+        expected_id = str(expected_channel_id or "").strip()
+        if expected_id:
+            if not any(str(item.get("id") or "") == expected_id for item in items):
+                return False, (
+                    f"Token belongs to '{actual}', not the channel locked to this account. "
+                    "Reconnect with the correct Google account."
+                )
+        else:
+            normalized_expected = self._normalize_channel_title(expected_channel)
+            if normalized_expected and not any(
+                self._normalize_channel_title(title) == normalized_expected
+                for title in actual_titles
+            ):
+                return False, (
+                    f"Token belongs to '{actual}', not expected channel "
+                    f"'{expected_channel}'. Reconnect with the correct Google account."
+                )
+
+        return True, f"OAuth refresh and YouTube channel check passed for '{actual}'."
 
     @classmethod
     def _verify_channel(
@@ -356,6 +457,20 @@ class YouTubeUploader:
 
             smart_titles=smart_titles,
         )
+        try:
+            source_age_limit = int(float((info or {}).get("age_limit") or 0))
+        except (TypeError, ValueError):
+            source_age_limit = 0
+        if source_age_limit >= 18:
+            self.last_metadata["source_age_limit"] = source_age_limit
+            logger.warning(
+                "Source metadata reports an %s+ age limit. The YouTube Data API "
+                "does not expose a writable self-age-restriction field, so the "
+                "upload proceeds under YouTube's normal moderation. If this "
+                "permitted mature upload must be proactively restricted, set Age "
+                "restriction (advanced) in YouTube Studio.",
+                source_age_limit,
+            )
 
         if not video_path.is_file() or video_path.stat().st_size <= 0:
             logger.error("YouTube upload file is missing or empty: %s", video_path)

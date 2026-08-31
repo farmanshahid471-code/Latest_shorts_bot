@@ -210,11 +210,14 @@ def save_metadata_sidecar(
         if not path.exists():
             return None
         sidecar = path.with_suffix(".txt")
+        source_age = metadata.get("source_age_limit")
+        source_age_label = f"{source_age}+" if source_age else "(not reported as 18+)"
         lines = [
             "=== SHORT METADATA (exact upload attempt) ===",
             "",
             f"Account       : {account or 'default'}",
             f"Source URL    : {source_url}",
+            f"Source age    : {source_age_label}",
             f"YouTube Short : {short_id or '(not uploaded)'}",
             "",
             f"TITLE         : {metadata.get('title', '')}",

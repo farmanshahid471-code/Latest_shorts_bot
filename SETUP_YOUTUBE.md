@@ -106,8 +106,15 @@ Repeat Steps 1–7 in each Google account for each of your channels.
 - **Quota:** each Google account gets **10,000 API units/day** (~6–10 uploads). With one
   separate account per channel, **every channel gets its own quota** — that's how you reach
   5–10 uploads/day per channel across many channels.
-- **Tokens expire** (testing-mode refresh tokens last ~7 days): if a tab stops uploading,
-  just press **Connect** again and re-login (per-account settings are kept).
+- **Keep the OAuth consent screen Published / In production.** Testing-mode refresh
+  tokens last about 7 days. The panel now force-refreshes every runnable account and
+  verifies its destination channel before **Start 24/7 Scheduler** succeeds; each
+  automatic account cycle checks again before downloading or rendering. If a token
+  is dead, startup/upload work is blocked and the message names the account that must
+  use **Connect / Test YouTube**. That button also force-refreshes first and opens the
+  login flow when replacement is required. Google does not expose the consent-screen
+  mode or a reliable seven-day expiry countdown in `token.json`, so the bot can prove
+  that a token works *now* but cannot promise how many days a Testing token has left.
 - **"OAuth 2 MUST utilize https" / `insecure_transport` error:** this was a bug in older
   versions of this bot. oauthlib rejects even the standard `http://localhost` loopback
   callback. The fix rewrites that callback to `https://localhost` (same as Google's own

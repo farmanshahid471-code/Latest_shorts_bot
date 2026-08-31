@@ -66,9 +66,15 @@ at *now* (e.g., a bot started at 08:00 in a 06:00–17:00 window spreads
 `max_daily_uploads` slots spread to the window end. Because YouTube holds the
 schedule, posts go out at exact spaced times even when the PC is off or the bot
 is stopped. 24/7 windows (empty or equal start/end) can't be spread, and if the
-window is nearly over the upload goes out immediately as public. It also needs
-the OAuth consent screen **Published (not Testing)** — a Testing-screen token
-expires after 7 days, which also blocks scheduled videos from ever publishing.
+window is nearly over the upload goes out immediately as public. Keep the OAuth
+consent screen **Published (not Testing)** — a Testing-screen refresh token expires
+after about 7 days and then blocks later uploads and scheduling API calls. Videos
+already accepted by YouTube with `publishAt` are server-side schedules, but the bot
+still needs valid OAuth for every new upload or schedule. Before scheduler startup,
+the panel force-refreshes all runnable account tokens and checks their channel locks;
+each open-window account cycle repeats that preflight before expensive processing.
+Google does not expose Testing/Published status or an exact seven-day countdown in
+the token file, so a successful check means "valid now," not "safe for another week."
 
 ## Upload states
 
@@ -81,6 +87,7 @@ expires after 7 days, which also blocks scheduled videos from ever publishing.
 | `DRY_RUN_READY` | No | Explicit preview; no API call/quota record. |
 | `UPLOAD_FAILED` | No | YouTube attempt failed. |
 | `PROCESSING_FAILED` | No | Download/render failed. |
+| `SOURCE_AUTH_REQUIRED` | No | An age-restricted source needs fresh authenticated 18+ viewer cookies. |
 | `UPLOADED_YOUTUBE` | Yes | Real YouTube ID was returned and recorded. |
 | `PROCESSED_MULTI` | Yes | Every requested part was uploaded. |
 
@@ -108,11 +115,12 @@ long it waits for `min_minutes_between_uploads`.
 Candidate resilience: if the picked source video fails (age-restricted, region
 block, transient error), the cycle moves to the NEXT unprocessed candidate —
 up to `CANDIDATE_ATTEMPTS_PER_CHANNEL` per source channel — instead of wasting
-the whole cycle. Videos that can never succeed (age-restricted, removed,
-private, region/copyright-blocked) are marked `SKIPPED` permanently so they
-stop poisoning future cycles; upcoming/live streams are filtered out during
-the channel scan and never become candidates at all. Accounts skipped because
-they are disabled or hit the rolling cap are always logged with the reason.
+the whole cycle. Removed, private, and region/copyright-blocked videos are marked
+`SKIPPED` permanently. Age-restricted sources are instead marked
+`SOURCE_AUTH_REQUIRED` and retried after authenticated 18+ cookies are available;
+upcoming/live streams are filtered out during the channel scan and never become
+candidates at all. Accounts skipped because they are disabled or hit the rolling
+cap are always logged with the reason.
 
 ### Web UI
 
@@ -232,15 +240,37 @@ R2_MAX_BUCKET_BYTES=8589934592
 
 Blank credentials skip R2. Pruning only touches `shorts/` and `reposts/` keys.
 
-### Download cookies
+### Authenticated source cookies (bot checks and eligible 18+ videos)
+
+The easiest setup is the control panel's **Age-restricted source access** box:
+export a Netscape-format `cookies.txt` while signed in to youtube.com with a
+Google account whose age is verified as 18+, then upload it there. The file is
+stored as the ignored project-root `cookies.txt`, shared by both bot variants,
+and is detected immediately without a restart. This panel-managed shared file
+takes precedence; remove it in the panel to fall back to a manually configured
+cookie source.
+
+You can instead configure either of these manually:
 
 ```ini
 YT_COOKIES_FILE=""
 YT_COOKIES_FROM_BROWSER=""
 ```
 
-Cookies are private credentials. Keep exported files ignored and rotate them if
-an older repository commit exposed them.
+Age-gated failures use the retryable `SOURCE_AUTH_REQUIRED` state. Old database
+rows that earlier bot versions incorrectly marked `SKIPPED` for an age gate are
+migrated back to that retryable state automatically. Removed, private,
+region-blocked, and copyright-blocked sources remain terminal.
+
+These cookies authenticate **source viewing only**; upload OAuth is separate.
+Cookies are private credentials, can expire, and must never be committed or
+shared. Refresh the export when age-gated downloads fail again.
+
+Access to an age-restricted source does not override YouTube's Community
+Guidelines or copyright rules. The YouTube Data API does not offer upload clients
+a writable self-age-restriction field. YouTube may classify an uploaded video,
+but if you must proactively mark your own permitted mature upload as 18+, review
+it in YouTube Studio and set **Age restriction (advanced)** there.
 
 ## Metadata guarantee
 

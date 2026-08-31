@@ -26,7 +26,11 @@ from .config import (
     _ENV_FILE,
     logger,
 )
-from .fetcher import ShortsFetcher, is_permanent_source_failure
+from .fetcher import (
+    ShortsFetcher,
+    is_age_restricted_source,
+    is_permanent_source_failure,
+)
 from .models import StateDB
 from .pathutils import safe_account_slug
 from .reprocessor import ShortReprocessor
@@ -109,7 +113,11 @@ class ShortsRepostScheduler:
         signal.signal(signal.SIGINT, handle_shutdown)
         signal.signal(signal.SIGTERM, handle_shutdown)
 
-    def run_single_cycle(self, accounts: Optional[list[dict]] = None) -> int:
+    def run_single_cycle(
+        self,
+        accounts: Optional[list[dict]] = None,
+        preflight_oauth: bool = False,
+    ) -> int:
         with pipeline_guard(blocking=False) as acquired:
             if not acquired:
                 logger.warning("Another repost pipeline is already active; cycle skipped.")
@@ -137,7 +145,10 @@ class ShortsRepostScheduler:
                     logger.info("Skipping disabled account: %s", account.get("name"))
                     continue
                 try:
-                    uploaded_count += self._run_cycle_for_account(account)
+                    uploaded_count += self._run_cycle_for_account(
+                        account,
+                        preflight_oauth=preflight_oauth,
+                    )
                 except Exception as exc:
                     logger.exception(
                         "Cycle failed for account '%s': %s", account.get("name"), exc
@@ -145,7 +156,11 @@ class ShortsRepostScheduler:
             logger.info("=== CYCLE COMPLETE: %s real upload(s) ===", uploaded_count)
             return uploaded_count
 
-    def _run_cycle_for_account(self, account: dict) -> int:
+    def _run_cycle_for_account(
+        self,
+        account: dict,
+        preflight_oauth: bool = False,
+    ) -> int:
         name = str(account.get("name") or "default").strip()
         window_error = validate_posting_window(account)
         if window_error:
@@ -203,6 +218,27 @@ class ShortsRepostScheduler:
             token_file=token,
             state_db=self.state_db,
         )
+        # Fail before downloading or rendering anything.  A forced refresh is
+        # essential here: a one-hour access token can still look valid after a
+        # Testing-mode refresh token has reached its seven-day expiry.
+        check_connection = getattr(uploader, "check_connection", None)
+        if (
+            preflight_oauth
+            and not getattr(uploader, "dry_run", False)
+            and callable(check_connection)
+        ):
+            auth_ok, auth_detail = check_connection(
+                expected_channel=expected_channel,
+                expected_channel_id=expected_channel_id,
+            )
+            if not auth_ok:
+                logger.error(
+                    "[%s] OAuth preflight FAILED; automatic uploads are blocked: %s",
+                    name,
+                    auth_detail,
+                )
+                return 0
+            logger.info("[%s] OAuth preflight passed: %s", name, auth_detail)
 
         uploaded_count = 0
         for channel_url in channels:
@@ -310,10 +346,26 @@ class ShortsRepostScheduler:
                     if self._last_upload_result == UPLOAD_QUOTA_REACHED:
                         break
                 except Exception as exc:
-                    if is_permanent_source_failure(exc):
-                        # Age-restricted / removed / region-blocked sources can
-                        # never succeed - mark them terminally SKIPPED instead of
-                        # retrying them forever, then continue to the next Short.
+                    if is_age_restricted_source(exc):
+                        # Fresh cookies from an age-verified 18+ account can
+                        # unlock this source, so it must remain retryable.
+                        logger.warning(
+                            "[%s] %s ('%s') needs age-verified YouTube cookies. "
+                            "Keeping it retryable and moving to the next Short.",
+                            name,
+                            video_id,
+                            short["title"],
+                        )
+                        self.state_db.record_video_state(
+                            video_id=video_id,
+                            video_url=short["url"],
+                            title=short["title"],
+                            status="SOURCE_AUTH_REQUIRED",
+                            error_msg=str(exc)[:500],
+                            account=name,
+                        )
+                    elif is_permanent_source_failure(exc):
+                        # Removed/private/region-blocked sources are terminal.
                         logger.warning(
                             "[%s] %s ('%s') can never be reposted: %s. Marking SKIPPED.",
                             name,
@@ -602,7 +654,7 @@ class ShortsRepostScheduler:
         logger.info("Starting interruptible Shorts repost scheduler.")
         try:
             while not self.stop_event.is_set():
-                self.run_single_cycle()
+                self.run_single_cycle(preflight_oauth=True)
                 if self.stop_event.is_set():
                     break
                 hours = self._current_interval_hours()

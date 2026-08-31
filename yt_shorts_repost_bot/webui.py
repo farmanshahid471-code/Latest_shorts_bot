@@ -50,6 +50,7 @@ _scheduler_instance = None
 ALLOWED_BGM_EXT = {".mp3", ".wav", ".m4a", ".aac"}
 MAX_BGM_BYTES = 25 * 1024 * 1024
 MAX_CREDENTIAL_BYTES = 2 * 1024 * 1024
+MAX_COOKIE_BYTES = 5 * 1024 * 1024
 _config_lock = threading.RLock()
 
 
@@ -109,6 +110,39 @@ def _is_placeholder(value) -> bool:
     if not v:
         return True
     return any(m in v for m in ("your_", "changeme", "replace_me", "your-cloudflare"))
+
+
+def _shared_cookie_path() -> Path:
+    """One ignored viewer-cookie file shared by both bot variants."""
+    return Path(__file__).resolve().parent.parent / "cookies.txt"
+
+
+def _valid_youtube_cookie_export(data: bytes) -> bool:
+    """Accept Netscape exports that contain at least one YouTube auth cookie."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if "# Netscape HTTP Cookie File" not in text or ".youtube.com" not in text:
+        return False
+    auth_names = {"SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO"}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("#HttpOnly_"):
+            line = line.removeprefix("#HttpOnly_")
+        elif not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if (
+            len(fields) >= 7
+            and ".youtube.com" in fields[0]
+            and (
+                fields[5] in auth_names
+                or (fields[5].startswith("__Secure-") and "SID" in fields[5])
+            )
+        ):
+            return True
+    return False
 
 
 def _esc(s) -> str:
@@ -218,6 +252,53 @@ def _find_account(name=None):
         if a.get("enabled", True):
             return a
     return accounts[0] if accounts else None
+
+
+def _preflight_enabled_accounts(accounts: Optional[list[dict]] = None) -> tuple[bool, str]:
+    """Force-refresh every runnable account before the scheduler can start."""
+    if DRY_RUN:
+        return True, "OAuth preflight skipped because explicit dry-run mode is active."
+
+    from .uploader import YouTubeUploader, resolve_credentials
+
+    selected = accounts if accounts is not None else _accounts_from_disk()
+    runnable = [
+        account
+        for account in selected
+        if account.get("enabled", True)
+        and bool(_clean_channels(account.get("target_channels")))
+    ]
+    if not runnable:
+        return True, "No enabled account with source channels needs an OAuth check yet."
+
+    passed: list[str] = []
+    failures: list[str] = []
+    for account in runnable:
+        name = str(account.get("name") or "default").strip()
+        client_secret, token = resolve_credentials(account)
+        uploader = YouTubeUploader(
+            client_secret_file=client_secret,
+            token_file=token,
+            state_db=StateDB(),
+        )
+        ok, detail = uploader.check_connection(
+            expected_channel=str(
+                account.get("expected_channel")
+                or account.get("connected_channel")
+                or ""
+            ).strip(),
+            expected_channel_id=str(account.get("connected_channel_id") or "").strip(),
+        )
+        if ok:
+            passed.append(name)
+            logger.info("[webui] OAuth preflight passed for '%s': %s", name, detail)
+        else:
+            failures.append(f"{name}: {detail}")
+            logger.error("[webui] OAuth preflight failed for '%s': %s", name, detail)
+
+    if failures:
+        return False, "OAuth check failed — scheduler not started. " + " | ".join(failures)
+    return True, "OAuth check passed for: " + ", ".join(passed)
 
 
 def _account_state(a: dict, db: StateDB) -> dict:
@@ -446,7 +527,10 @@ def create_app(testing: bool = False) -> Flask:
             return _redirect_msg("Another video pipeline is currently active.", ok=False)
         if "run-once" in _active_jobs():
             return _redirect_msg("A cycle is already running - wait for it to finish.", ok=False)
-        _spawn_job("run-once", lambda: ShortsRepostScheduler().run_single_cycle())
+        _spawn_job(
+            "run-once",
+            lambda: ShortsRepostScheduler().run_single_cycle(preflight_oauth=True),
+        )
         logger.info("[webui] User clicked 'Run One Cycle'.")
         return _redirect_msg("Cycle started - watch the logs.")
 
@@ -482,10 +566,15 @@ def create_app(testing: bool = False) -> Flask:
             return _redirect_msg("Wait for the active video pipeline to finish.", ok=False)
         if _scheduler_thread and _scheduler_thread.is_alive():
             return _redirect_msg("The 24/7 scheduler is already running.", ok=False)
+        auth_ok, auth_message = _preflight_enabled_accounts()
+        if not auth_ok:
+            return _redirect_msg(auth_message, ok=False)
         _scheduler_thread = threading.Thread(target=_scheduler_worker, daemon=True, name="webui-scheduler")
         _scheduler_thread.start()
-        logger.info("[webui] 24/7 scheduler STARTED.")
-        return _redirect_msg("24/7 scheduler started (initial cycle runs now).")
+        logger.info("[webui] 24/7 scheduler STARTED. %s", auth_message)
+        return _redirect_msg(
+            f"24/7 scheduler started (initial cycle runs now). {auth_message}"
+        )
 
     @app.post("/api/scheduler/stop")
     def api_scheduler_stop():
@@ -510,6 +599,55 @@ def create_app(testing: bool = False) -> Flask:
         (BGM_DIR / Path(file.filename).name).write_bytes(data)
         logger.info(f"[webui] Uploaded background music: {file.filename}")
         return _redirect_msg(f"Saved {file.filename} - the bot can now use it.")
+
+    @app.post("/api/youtube-cookies")
+    def api_youtube_cookies_upload():
+        """Install viewer cookies used by yt-dlp for eligible 18+ sources."""
+        file = request.files.get("file")
+        if not file or not file.filename:
+            return _redirect_msg("No cookies.txt file selected.", ok=False)
+        data = file.read(MAX_COOKIE_BYTES + 1)
+        if len(data) > MAX_COOKIE_BYTES:
+            return _redirect_msg("cookies.txt is unexpectedly larger than 5 MB.", ok=False)
+        if not _valid_youtube_cookie_export(data):
+            return _redirect_msg(
+                "Invalid cookies file. Export Netscape cookies.txt while signed in "
+                "to YouTube with an age-verified 18+ Google account.",
+                ok=False,
+            )
+
+        destination = _shared_cookie_path()
+        temporary = destination.with_name(
+            f".{destination.name}.{secrets.token_hex(6)}.tmp"
+        )
+        with _config_lock:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_bytes(data)
+            try:
+                temporary.chmod(0o600)
+            except OSError:
+                pass
+            os.replace(temporary, destination)
+        # StateDB startup migration makes age gates skipped by older versions
+        # retryable again. Constructing it here also applies that migration
+        # immediately if the panel has stayed open during an upgrade.
+        StateDB()
+        logger.info(
+            "[webui] Installed authenticated YouTube viewer cookies (%d bytes) at %s.",
+            len(data),
+            destination,
+        )
+        return _redirect_msg(
+            "YouTube viewer cookies saved. Age-restricted sources are now retryable; "
+            "refresh this file when YouTube expires the browser session."
+        )
+
+    @app.post("/api/youtube-cookies/delete")
+    def api_youtube_cookies_delete():
+        destination = _shared_cookie_path()
+        destination.unlink(missing_ok=True)
+        logger.info("[webui] Removed shared YouTube viewer cookies.")
+        return _redirect_msg("YouTube viewer cookies removed.")
 
     @app.post("/api/client-secret")
     def api_client_secret_upload():
@@ -585,7 +723,10 @@ def create_app(testing: bool = False) -> Flask:
                     up = YouTubeUploader(client_secret_file=cs, token_file=tk, state_db=StateDB())
                 else:
                     up = YouTubeUploader()
-                svc = up._get_authenticated_service()
+                # Force a refresh even when the short-lived access token still
+                # works, so Connect/Test detects a dead seven-day refresh token
+                # and immediately opens the consent flow to replace it.
+                svc = up._get_authenticated_service(force_refresh=True)
                 if svc:
                     logger.info(f"[webui] ✅ YouTube auth OK for '{acc_name or 'default'}'")
                     try:
@@ -1004,9 +1145,23 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
         credential_path(base_dir, loaded_account, loaded_acc.get("token"), "token.json")
     )
     tab_secret_present = Path(acc_cs).is_file()
+    cookie_path = _shared_cookie_path()
+    try:
+        cookie_valid = (
+            cookie_path.is_file()
+            and cookie_path.stat().st_size <= MAX_COOKIE_BYTES
+            and _valid_youtube_cookie_export(cookie_path.read_bytes())
+        )
+    except OSError:
+        cookie_valid = False
+    cookie_status = (
+        f"✅ Authenticated viewer cookies ready: {_esc(cookie_path)}"
+        if cookie_valid
+        else "❌ No valid authenticated YouTube viewer cookies are installed"
+    )
     yt_status = (f'<div style="white-space:pre-line;">'
                  f"{'✅' if tab_secret_present else '❌'} client_secret.json {'present' if tab_secret_present else 'MISSING - upload it below'}\n"
-                 f"{'✅' if st['connected'] else '❌'} {'token.json present' if st['connected'] else 'not connected yet - press Connect'}\n"
+                 f"{'✅' if st['connected'] else '❌'} {'token.json present — live validity is checked at scheduler start' if st['connected'] else 'not connected yet - press Connect'}\n"
                  f"📁 this tab: {_esc(acc_cs)}\n"
                  f"🔑 this tab: {_esc(acc_tk)}</div>")
 
@@ -1089,7 +1244,7 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
   <h1>🔁 Shorts Repost Bot</h1>
   <div class="sub">Each tab = one of YOUR channels. Configure separately, run all together.</div>
   <div class="badges">
-    <span class="badge" style="border-color:var(--pink);color:var(--pink);">v7.0 (Aug 23, 2026)</span>
+    <span class="badge" style="border-color:var(--pink);color:var(--pink);">v7.1 (Aug 31, 2026)</span>
     {mode_badge} {sched_badge} {jobs_badge}
   </div>
 
@@ -1141,7 +1296,35 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
         <b>📌 Each account connects with its own Google login</b> (its own channel).
         Sign in with the Google account of the channel this tab should upload to.
         Tip: for 10 uploads/day per channel, use a SEPARATE Google Cloud project
-        + client_secret.json per channel (add its email to that project's Test users).
+        + client_secret.json per channel. Keep every OAuth consent screen
+        <b>Published / In production</b>, not Testing. Before the scheduler starts,
+        the bot forces a token refresh and checks the destination channel. If the
+        token must be replaced, startup is blocked and this panel tells you which
+        account must use Connect / Test YouTube. Google does not expose an exact
+        Testing-mode seven-day countdown to the bot.
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px;">
+        <h2 style="font-size:14px;">🔞 Age-restricted source access</h2>
+        <div class="hint" style="margin-bottom:8px;">{cookie_status}</div>
+        <form action="/api/youtube-cookies" method="POST" enctype="multipart/form-data">
+          <div class="row">
+            <input type="file" name="file" accept=".txt,text/plain" style="flex:1;" required>
+            <button class="cyan" type="submit">Upload cookies.txt</button>
+          </div>
+        </form>
+        <form action="/api/youtube-cookies/delete" method="POST" style="margin-top:8px;">
+          <button class="gray" type="submit">Remove viewer cookies</button>
+        </form>
+        <div class="hint" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:8px;">
+          Export a <b>Netscape cookies.txt</b> while signed in at youtube.com with a
+          Google account whose age is verified as 18+. This login is only for
+          reading source videos; it is separate from upload OAuth and is shared by
+          both bots. Cookies are private credentials and may expire, so refresh
+          them when age-gated downloads fail again. This supports mature content
+          that YouTube permits; it does not bypass Community Guidelines, copyright,
+          private videos, or regional blocks.
+        </div>
       </div>
     </div>
 
@@ -1234,7 +1417,7 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
       <form action="/api/scheduler/start" method="POST" style="display:inline;"><button class="green" type="submit">Start 24/7 Scheduler</button></form>
       <form action="/api/scheduler/stop" method="POST" style="display:inline;"><button class="gray" type="submit">Stop Scheduler</button></form>
     </div>
-    <div class="hint">Runs ALL enabled accounts (each with its own settings/quota).</div>
+    <div class="hint">Runs ALL enabled accounts (each with its own settings/quota). Start first performs a live OAuth refresh + channel check and refuses to run if any active account needs reconnection.</div>
   </div>
 
   <div class="card">

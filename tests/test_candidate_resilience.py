@@ -4,8 +4,8 @@ SKIPPED marking, candidate retry, and min-gap enforcement between parts.
 These cover the failure modes seen in production:
   1. An upcoming live event (duration 0) was picked as the newest candidate and
      failed with 'This live event will begin in ...', wasting the whole cycle.
-  2. An age-restricted video wasted the cycle AND was retried forever because
-     PROCESSING_FAILED is not terminal.
+  2. Age-restricted videos need authenticated 18+ viewer cookies and must remain
+     retryable after those cookies are added or refreshed.
   3. min_minutes_between_uploads was only enforced between source videos, so a
      multi-part video uploaded all its parts back-to-back (burst posting).
   4. Quota-capped / disabled accounts were skipped without any log line.
@@ -18,6 +18,7 @@ import yt_shorts_bot.fetcher as clip_fetcher_module
 import yt_shorts_bot.scheduler as clip_scheduler_module
 from yt_shorts_bot.fetcher import (
     YouTubeFetcher,
+    is_age_restricted_source,
     is_permanent_source_failure,
 )
 from yt_shorts_bot.models import StateDB
@@ -25,6 +26,7 @@ from yt_shorts_bot.scheduler import ShortsBotScheduler
 import yt_shorts_repost_bot.scheduler as repost_scheduler_module
 from yt_shorts_repost_bot.fetcher import (
     ShortsFetcher,
+    is_age_restricted_source as repost_is_age_restricted,
     is_permanent_source_failure as repost_is_permanent,
 )
 from yt_shorts_repost_bot.models import StateDB as RepostStateDB
@@ -42,7 +44,11 @@ BOT_WALL = "[youtube] abcdefghijk: Sign in to confirm you're not a bot"
 # Permanent-failure detection
 # ---------------------------------------------------------------------------
 def test_permanent_failure_detection():
-    assert is_permanent_source_failure(RuntimeError(AGE_GATE))
+    # Age gates are authentication failures, not permanent source failures.
+    assert not is_permanent_source_failure(RuntimeError(AGE_GATE))
+    assert is_age_restricted_source(RuntimeError(AGE_GATE))
+    assert not repost_is_permanent(RuntimeError(AGE_GATE))
+    assert repost_is_age_restricted(RuntimeError(AGE_GATE))
     assert is_permanent_source_failure(RuntimeError("This video is not available"))
     assert is_permanent_source_failure(RuntimeError("Private video"))
     assert is_permanent_source_failure(
@@ -53,7 +59,6 @@ def test_permanent_failure_detection():
     # Bot walls / rate limits / network errors are transient too.
     assert not is_permanent_source_failure(RuntimeError(BOT_WALL))
     assert not is_permanent_source_failure(RuntimeError("HTTP Error 429: Too Many Requests"))
-    assert repost_is_permanent(RuntimeError(AGE_GATE))
     assert not repost_is_permanent(RuntimeError(UPCOMING))
 
 
@@ -154,7 +159,7 @@ def _account(name, **overrides):
 # ---------------------------------------------------------------------------
 # Candidate retry: a poisoned candidate no longer wastes the whole cycle
 # ---------------------------------------------------------------------------
-def test_cycle_moves_to_next_candidate_after_permanent_failure(monkeypatch, tmp_path):
+def test_cycle_keeps_age_gate_retryable_and_moves_to_next_candidate(monkeypatch, tmp_path):
     class _FakeFetcher:
         def __init__(self, *args, **kwargs):
             pass
@@ -201,10 +206,11 @@ def test_cycle_moves_to_next_candidate_after_permanent_failure(monkeypatch, tmp_
     assert uploaded == 1
     assert processed == ["retrygood01"]
     state = db.get_video_state("retrybad001", "RetryAcc")
-    assert state is not None and state["status"] == "SKIPPED"
-    # The claim must be released so later cycles can work normally.
-    assert db.claim_video("retrybad001", "RetryAcc") is None  # terminal, cannot reclaim
-    assert db.claim_video("retrygood01", "RetryAcc") is not None or True
+    assert state is not None and state["status"] == "SOURCE_AUTH_REQUIRED"
+    # The claim is released and the source can be retried after cookies are added.
+    claim = db.claim_video("retrybad001", "RetryAcc")
+    assert claim is not None
+    db.release_video_claim("retrybad001", "RetryAcc", claim)
 
 
 def test_cycle_gives_up_after_configured_attempts(monkeypatch, tmp_path, caplog):

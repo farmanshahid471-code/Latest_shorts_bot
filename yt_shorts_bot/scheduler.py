@@ -27,7 +27,11 @@ from .config import (
     _ENV_FILE,
     logger,
 )
-from .fetcher import YouTubeFetcher, is_permanent_source_failure
+from .fetcher import (
+    YouTubeFetcher,
+    is_age_restricted_source,
+    is_permanent_source_failure,
+)
 from .hashtags import save_metadata_sidecar, srt_to_text
 from .models import StateDB
 from .pathutils import safe_account_slug
@@ -113,7 +117,11 @@ class ShortsBotScheduler:
         signal.signal(signal.SIGINT, handle_shutdown)
         signal.signal(signal.SIGTERM, handle_shutdown)
 
-    def run_single_cycle(self, accounts: Optional[list[dict]] = None) -> int:
+    def run_single_cycle(
+        self,
+        accounts: Optional[list[dict]] = None,
+        preflight_oauth: bool = False,
+    ) -> int:
         with pipeline_guard(blocking=False) as acquired:
             if not acquired:
                 logger.warning("Another clip pipeline is active; cycle skipped.")
@@ -145,7 +153,10 @@ class ShortsBotScheduler:
                     )
                     continue
                 try:
-                    total_uploaded += self._run_cycle_for_account(account)
+                    total_uploaded += self._run_cycle_for_account(
+                        account,
+                        preflight_oauth=preflight_oauth,
+                    )
                 except Exception as exc:
                     logger.exception(
                         "Cycle failed for account '%s': %s", account.get("name"), exc
@@ -153,7 +164,11 @@ class ShortsBotScheduler:
             logger.info("=== CLIP CYCLE COMPLETE: %s real upload(s) ===", total_uploaded)
             return total_uploaded
 
-    def _run_cycle_for_account(self, account: dict) -> int:
+    def _run_cycle_for_account(
+        self,
+        account: dict,
+        preflight_oauth: bool = False,
+    ) -> int:
         name = str(account.get("name") or "default").strip()
         window_error = validate_posting_window(account)
         if window_error:
@@ -223,6 +238,27 @@ class ShortsBotScheduler:
             token_file=token,
             state_db=self.state_db,
         )
+        # Fail before downloading or rendering anything.  A forced refresh is
+        # essential here: a one-hour access token can still look valid after a
+        # Testing-mode refresh token has reached its seven-day expiry.
+        check_connection = getattr(uploader, "check_connection", None)
+        if (
+            preflight_oauth
+            and not getattr(uploader, "dry_run", False)
+            and callable(check_connection)
+        ):
+            auth_ok, auth_detail = check_connection(
+                expected_channel=expected_channel,
+                expected_channel_id=expected_channel_id,
+            )
+            if not auth_ok:
+                logger.error(
+                    "[%s] OAuth preflight FAILED; automatic uploads are blocked: %s",
+                    name,
+                    auth_detail,
+                )
+                return 0
+            logger.info("[%s] OAuth preflight passed: %s", name, auth_detail)
         uploaded_count = 0
 
         for channel_url in channels:
@@ -355,10 +391,27 @@ class ShortsBotScheduler:
                     )
                     handled = True
                 except Exception as exc:
-                    if is_permanent_source_failure(exc):
-                        # Age-restricted / removed / region-blocked videos can
-                        # never succeed. Mark them terminally SKIPPED instead of
-                        # retrying them forever, then try the next candidate.
+                    if is_age_restricted_source(exc):
+                        # Unlike removed/private videos, this can succeed after
+                        # the user uploads fresh cookies from a verified 18+
+                        # account. Never make an age gate terminal.
+                        logger.warning(
+                            "[%s] %s ('%s') needs age-verified YouTube cookies. "
+                            "Keeping it retryable and moving to the next candidate.",
+                            name,
+                            video_id,
+                            video.get("title", ""),
+                        )
+                        self.state_db.record_video_state(
+                            video_id=video_id,
+                            video_url=video["url"],
+                            title=video["title"],
+                            status="SOURCE_AUTH_REQUIRED",
+                            error_msg=str(exc)[:500],
+                            account=name,
+                        )
+                    elif is_permanent_source_failure(exc):
+                        # Removed/private/region-blocked videos cannot succeed.
                         logger.warning(
                             "[%s] %s ('%s') can never be clipped: %s. Marking SKIPPED "
                             "and moving to the next candidate.",
@@ -799,7 +852,7 @@ class ShortsBotScheduler:
         logger.info("Starting interruptible clip scheduler.")
         try:
             while not self.stop_event.is_set():
-                self.run_single_cycle()
+                self.run_single_cycle(preflight_oauth=True)
                 if self.stop_event.is_set():
                     break
                 hours = self._current_interval_hours()

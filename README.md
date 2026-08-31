@@ -128,15 +128,31 @@ that handles every enabled account tab. It does not start only the active tab.
 Each account independently applies its own time zone/window, upload cap and
 pacing. Disable an account to exclude it; **Stop Scheduler** stops all tabs.
 
+### Age-restricted source videos
+
+Both panels now have **Age-restricted source access → Upload cookies.txt**.
+Export a Netscape-format cookie file while signed in to youtube.com with an
+age-verified 18+ Google account. Both bots detect the shared ignored file
+immediately. Age-gated sources remain retryable (`SOURCE_AUTH_REQUIRED`), and
+sources incorrectly marked `SKIPPED` by older builds are automatically requeued.
+Viewer cookies are separate from upload OAuth and must be kept private.
+
+This only enables access to eligible mature source material. It does not bypass
+private/region/copyright restrictions or YouTube's Community Guidelines. The
+YouTube Data API cannot proactively set YouTube's self-imposed 18+ upload flag;
+if that flag is required for permitted content, set **Age restriction (advanced)**
+in YouTube Studio. See `SETTINGS_GUIDE.md` for details.
+
 ## Clip-bot pipeline
 
 ```text
 channel scan (deep window, newest/oldest/random order;
               live/upcoming streams and existing Shorts filtered out)
   -> skip videos already uploaded, pick the FIRST unprocessed one
-     (un-clip-able videos - age-restricted/removed/region-blocked -
-      are permanently SKIPPED; on failure the cycle tries the NEXT
-      candidate, up to CANDIDATE_ATTEMPTS_PER_CHANNEL)
+     (removed/private/region-blocked videos are permanently SKIPPED;
+      age-restricted sources stay retryable and use authenticated 18+
+      viewer cookies; on failure the cycle tries the NEXT candidate,
+      up to CANDIDATE_ATTEMPTS_PER_CHANNEL)
   -> best 15-20s moment:
        combined: Most Replayed heatmap + audio excitement
        (loud & high-pitched voice). Either signal is used when the
@@ -163,7 +179,13 @@ Both bots also support **YouTube-side scheduled publishing**: turning on
 Shorts privately immediately, with YouTube `publishAt` times spaced evenly from
 *now* until the posting window ends. The local min-gap pacing is then skipped
 and YouTube publishes each Short at its exact scheduled time — even while the
-bot is offline. See `SETTINGS_GUIDE.md` for details and fallbacks.
+bot is offline. Keep every OAuth consent screen **Published / In production**.
+Scheduler startup force-refreshes each runnable account and checks its destination
+channel, then every open-window account cycle checks again before processing. If
+replacement is required, the scheduler is blocked and the panel names the account
+to reconnect. Google does not provide an exact Testing-mode seven-day countdown,
+so this is a live validity check rather than an expiry forecast. See
+`SETTINGS_GUIDE.md` for details and fallbacks.
 
 ## Repost-bot pipeline
 

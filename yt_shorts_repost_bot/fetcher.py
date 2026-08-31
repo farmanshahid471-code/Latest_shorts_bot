@@ -26,12 +26,10 @@ from .config import (
 )
 
 # yt-dlp messages meaning the SOURCE Short can never be downloaded, no matter
-# how many times it is retried (age-restricted, removed, private, region or
-# copyright blocked). Such videos are marked SKIPPED so the scheduler stops
-# wasting attempts on them.
+# how many times it is retried (removed, private, region/copyright blocked).
+# Age restrictions are deliberately retryable: adding fresh cookies from an
+# age-verified Google account can unlock them.
 PERMANENT_SOURCE_FAILURE_MARKERS: tuple = (
-    "sign in to confirm your age",
-    "age-restricted",
     "this video is not available",
     "video unavailable",
     "private video",
@@ -53,6 +51,15 @@ def is_permanent_source_failure(error: object) -> bool:
     return any(marker in text for marker in PERMANENT_SOURCE_FAILURE_MARKERS)
 
 
+def is_age_restricted_source(error: object) -> bool:
+    """True when authenticated, age-verified viewing cookies are required."""
+    text = str(error).lower()
+    return any(
+        marker in text
+        for marker in ("confirm your age", "verify your age", "age-restricted")
+    )
+
+
 class ShortsFetcher:
     """Finds and downloads full YouTube Shorts from target channels."""
 
@@ -64,19 +71,14 @@ class ShortsFetcher:
     def _cookies_opts() -> dict:
         opts = {}
 
-        # Search several places for a cookies.txt so the repost bot can share
-        # the one from the clip-farming bot (yt_shorts_bot/) automatically:
-        #   1. YT_COOKIES_FILE from .env
-        #   2. this bot's own folder: yt_shorts_repost_bot/cookies.txt
-        #   3. sibling clip bot folder: yt_shorts_bot/cookies.txt
-        #   4. project root: cookies.txt
-        candidates = []
+        # Search several places. The control panel's shared project-root file
+        # takes precedence; remove it there to fall back to env/package files.
+        candidates = [BASE_DIR.parent / "cookies.txt"]
         if YT_COOKIES_FILE:
             candidates.append(Path(YT_COOKIES_FILE))
         candidates += [
             BASE_DIR / "cookies.txt",
             BASE_DIR.parent / "yt_shorts_bot" / "cookies.txt",
-            BASE_DIR.parent / "cookies.txt",
         ]
 
         found = None
@@ -88,7 +90,13 @@ class ShortsFetcher:
 
         if found:
             opts["cookiefile"] = str(found)
-            logger.info(f"Using YouTube cookies from file: {found}")
+            logger.info("Using YouTube cookies from file: %s", found)
+            if not ShortsFetcher._cookies_look_valid(found):
+                logger.warning(
+                    "cookies.txt does not appear to contain authenticated YouTube "
+                    "cookies. Re-export it while signed in to an age-verified 18+ "
+                    "Google account."
+                )
         elif YT_COOKIES_FILE:
             logger.warning(
                 f"YT_COOKIES_FILE is set to '{YT_COOKIES_FILE}' but the file was not found. "
@@ -100,6 +108,37 @@ class ShortsFetcher:
             opts["cookiesfrombrowser"] = (browser,)
             logger.info(f"Using YouTube cookies from browser: {browser}")
         return opts
+
+    @staticmethod
+    def _cookies_look_valid(cookie_path: Path) -> bool:
+        """Cheap check for a Netscape file containing YouTube login cookies."""
+        try:
+            text = cookie_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if "# Netscape HTTP Cookie File" not in text or ".youtube.com" not in text:
+            return False
+        auth_names = {"SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO"}
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line.startswith("#HttpOnly_"):
+                line = line.removeprefix("#HttpOnly_")
+            elif not line or line.startswith("#"):
+                continue
+            fields = line.split("\t")
+            if (
+                len(fields) >= 7
+                and ".youtube.com" in fields[0]
+                and (
+                    fields[5] in auth_names
+                    or (
+                        fields[5].startswith("__Secure-")
+                        and "SID" in fields[5]
+                    )
+                )
+            ):
+                return True
+        return False
 
     @staticmethod
     def _ffmpeg_opt() -> dict:
@@ -138,8 +177,7 @@ class ShortsFetcher:
     @staticmethod
     def _is_age_gate_error(error: Exception) -> bool:
         """True if YouTube demands an age-verified (18+) sign-in for a video."""
-        text = str(error).lower()
-        return "confirm your age" in text or "age-restricted" in text
+        return is_age_restricted_source(error)
 
     @staticmethod
     def _extract_video_id(video_url: str) -> str:
@@ -242,8 +280,8 @@ class ShortsFetcher:
                 if self._is_age_gate_error(e):
                     logger.error(
                         f"Feed {feed} hit an AGE-RESTRICTED video ('Sign in to confirm "
-                        "your age'). Cookies unlock this only when exported from a Google "
-                        "account with verified 18+ age, and they expire quickly."
+                        "your age'). Upload fresh Netscape cookies.txt from a Google "
+                        "account with verified 18+ age in the control panel."
                     )
                 elif self._is_bot_check_error(e):
                     logger.error(
@@ -318,14 +356,20 @@ class ShortsFetcher:
                 )
                 for fragment in output_path.parent.glob(f"{output_path.stem}*.part*"):
                     fragment.unlink(missing_ok=True)
-                if self._is_age_gate_error(e) or is_permanent_source_failure(e):
-                    # Trying other player clients cannot unlock an age-restricted,
-                    # removed, private or region-blocked Short - fail fast so the
-                    # scheduler can mark it SKIPPED and move on.
+                if self._is_age_gate_error(e):
+                    # Player-client retries cannot replace authenticated viewing.
+                    # Keep this source retryable so fresh 18+ cookies can unlock it.
                     logger.error(
-                        "This Short can never be downloaded (%s). It is age-restricted, "
-                        "removed, private or region/copyright-blocked; it will be "
-                        "marked SKIPPED.",
+                        "This Short is age-restricted. Upload fresh cookies.txt from "
+                        "an age-verified 18+ Google account; it remains retryable: %s",
+                        e,
+                    )
+                    raise
+                if is_permanent_source_failure(e):
+                    logger.error(
+                        "This Short can never be downloaded because it was removed, "
+                        "made private, or region/copyright-blocked; it will be marked "
+                        "SKIPPED: %s",
                         e,
                     )
                     raise

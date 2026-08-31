@@ -212,7 +212,28 @@ class StateDB:
                 ON upload_reservations(account, expires_at)
                 """
             )
+            # Older builds incorrectly treated an age gate as permanent and
+            # stored SKIPPED. Fresh cookies can unlock those sources, so migrate
+            # them back to a descriptive retryable state automatically.
+            requeued = conn.execute(
+                """
+                UPDATE processed_videos
+                SET status = 'SOURCE_AUTH_REQUIRED', updated_at = ?
+                WHERE status = 'SKIPPED' AND (
+                    lower(coalesce(error_msg, '')) LIKE '%sign in to confirm your age%'
+                    OR lower(coalesce(error_msg, '')) LIKE '%age-restricted%'
+                    OR lower(coalesce(error_msg, '')) LIKE '%verify your age%'
+                )
+                """,
+                (self._iso_now(),),
+            ).rowcount
             conn.commit()
+            if requeued:
+                logger.info(
+                    "Requeued %d previously skipped age-restricted source(s); "
+                    "fresh 18+ viewer cookies can now unlock them.",
+                    requeued,
+                )
         logger.debug("StateDB initialized at %s", self.db_path)
 
     # ------------------------------------------------------------------

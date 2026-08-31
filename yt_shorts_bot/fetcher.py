@@ -38,14 +38,12 @@ from .config import (
 )
 
 # yt-dlp messages meaning the SOURCE video can never be clipped, no matter how
-# many times it is retried (age-restricted, removed, private, region/copyright
-# blocked). Such videos are marked SKIPPED so the scheduler stops wasting
-# cycles on them. Deliberately NOT in this list: "This live event will begin
-# in ..." (upcoming streams DO become clip-able VODs later) and bot/429 walls
-# (transient).
+# many times it is retried (removed, private, region/copyright blocked). Such
+# videos are marked SKIPPED so the scheduler stops wasting cycles on them.
+# Age restrictions are deliberately retryable: adding fresh cookies from an
+# age-verified Google account can unlock them. Upcoming streams, bot/429 walls,
+# and age gates are therefore not permanent failures.
 PERMANENT_SOURCE_FAILURE_MARKERS: tuple = (
-    "sign in to confirm your age",
-    "age-restricted",
     "this video is not available",
     "video unavailable",
     "private video",
@@ -65,6 +63,15 @@ def is_permanent_source_failure(error: object) -> bool:
     """True when retrying this source video can never succeed."""
     text = str(error).lower()
     return any(marker in text for marker in PERMANENT_SOURCE_FAILURE_MARKERS)
+
+
+def is_age_restricted_source(error: object) -> bool:
+    """True when authenticated, age-verified viewing cookies are required."""
+    text = str(error).lower()
+    return any(
+        marker in text
+        for marker in ("confirm your age", "verify your age", "age-restricted")
+    )
 
 
 # Flat-listing live_status values that are never clip-able right now: a live
@@ -186,60 +193,88 @@ class YouTubeFetcher:
 
     @staticmethod
     def _cookies_opts() -> dict:
-        """
-        Returns yt-dlp options for YouTube authentication cookies.
-        Fixes: "Sign in to confirm you're not a bot".
+        """Return yt-dlp login options for bot checks and age-restricted sources.
+
+        The lookup happens on every request so a cookie file uploaded from the
+        running control panel works immediately without restarting the bot.
+        Both bot variants can share the project-root ``cookies.txt``.
         """
         opts = {}
-
+        # The control panel's shared project-root file takes precedence. Remove
+        # it in the panel to fall back to an explicit env/package cookie file.
+        candidates = [BASE_DIR.parent / "cookies.txt"]
         if YT_COOKIES_FILE:
-            cf_path = Path(YT_COOKIES_FILE)
-            if not cf_path.is_absolute():
-                cf_path = BASE_DIR / cf_path
-            if cf_path.exists():
-                opts["cookiefile"] = str(cf_path)
-                logger.info(f"Using YouTube cookies from file: {cf_path}")
-                if not YouTubeFetcher._cookies_look_valid(cf_path):
-                    logger.warning(
-                        "cookies.txt exists but does NOT contain YouTube login cookies "
-                        "(looks empty or expired). Re-export it while LOGGED IN on "
-                        "youtube.com - otherwise YouTube can still show the bot check."
-                    )
-            else:
+            candidates.append(Path(YT_COOKIES_FILE))
+        candidates += [
+            BASE_DIR / "cookies.txt",
+            BASE_DIR.parent / "yt_shorts_repost_bot" / "cookies.txt",
+        ]
+
+        found = None
+        seen = set()
+        for candidate in candidates:
+            path = candidate if candidate.is_absolute() else BASE_DIR / candidate
+            normalized = str(path.resolve())
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            if path.is_file():
+                found = path
+                break
+
+        if found:
+            opts["cookiefile"] = str(found)
+            logger.info("Using YouTube cookies from file: %s", found)
+            if not YouTubeFetcher._cookies_look_valid(found):
                 logger.warning(
-                    f"YT_COOKIES_FILE is set to '{YT_COOKIES_FILE}' but that file was not found. "
-                    "Skipping cookies - YouTube may ask you to sign in."
+                    "cookies.txt does not appear to contain authenticated YouTube "
+                    "cookies. Re-export it while signed in to an age-verified 18+ "
+                    "Google account."
                 )
+        elif YT_COOKIES_FILE:
+            logger.warning(
+                "YT_COOKIES_FILE is set to '%s' but no cookie file was found. "
+                "Also checked both bot folders and the project root.",
+                YT_COOKIES_FILE,
+            )
 
         browser = YT_COOKIES_FROM_BROWSER.strip().lower()
         if browser:
             opts["cookiesfrombrowser"] = (browser,)
-            logger.info(f"Using YouTube cookies from browser: {browser}")
+            logger.info("Using YouTube cookies from browser: %s", browser)
 
         return opts
 
     @staticmethod
-    def _cookies_look_valid(cf_path: Path) -> bool:
-        """
-        Cheap sanity check: a valid exported YouTube cookie file (Netscape format)
-        contains lines for .youtube.com with auth cookies like SID/SSID/APISID/HSID
-        or __Secure-1PSID. Returns False if the file looks empty/expired.
-        """
+    def _cookies_look_valid(cookie_path: Path) -> bool:
+        """Cheap check for a Netscape file containing YouTube login cookies."""
         try:
-            text = cf_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+            text = cookie_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             return False
-        if "# Netscape HTTP Cookie File" not in text and ".youtube.com" not in text:
+        if "# Netscape HTTP Cookie File" not in text or ".youtube.com" not in text:
             return False
-        auth_markers = ("SID", "APISID", "HSID", "SSID", "SAPISID")
-        has_auth = any(
-            marker in line
-            for line in text.splitlines()
-            if line.strip() and not line.startswith("#")
-            and ".youtube.com" in line
-            for marker in auth_markers
-        )
-        return has_auth
+        auth_names = {"SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO"}
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line.startswith("#HttpOnly_"):
+                line = line.removeprefix("#HttpOnly_")
+            elif not line or line.startswith("#"):
+                continue
+            fields = line.split("\t")
+            if (
+                len(fields) >= 7
+                and ".youtube.com" in fields[0]
+                and (
+                    fields[5] in auth_names
+                    or (
+                        fields[5].startswith("__Secure-")
+                        and "SID" in fields[5]
+                    )
+                )
+            ):
+                return True
+        return False
 
     def fetch_channel_recent_videos(
         self,
@@ -396,8 +431,7 @@ class YouTubeFetcher:
     @staticmethod
     def _is_age_gate_error(error: Exception) -> bool:
         """True if YouTube demands an age-verified (18+) sign-in for a video."""
-        text = str(error).lower()
-        return "confirm your age" in text or "age-restricted" in text
+        return is_age_restricted_source(error)
 
     @staticmethod
     def _ensure_not_live(info: Dict[str, Any]) -> None:
@@ -439,11 +473,10 @@ class YouTubeFetcher:
         except Exception as e:
             if self._is_age_gate_error(e):
                 logger.error(
-                    "This video is AGE-RESTRICTED ('Sign in to confirm your age'). Cookies "
-                    "unlock it ONLY when exported from a Google account with verified 18+ age, "
-                    "and they expire quickly - re-export cookies.txt regularly. The scheduler "
-                    "marks repeatedly age-gated videos as SKIPPED so other candidates still "
-                    "get processed."
+                    "This video is AGE-RESTRICTED ('Sign in to confirm your age'). "
+                    "Upload fresh Netscape cookies.txt from a Google account with "
+                    "verified 18+ age in the control panel. This source remains "
+                    "retryable, and the scheduler will continue to other candidates."
                 )
             elif self._is_bot_check_error(e):
                 logger.error(
