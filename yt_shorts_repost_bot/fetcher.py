@@ -25,6 +25,33 @@ from .config import (
     logger,
 )
 
+# yt-dlp messages meaning the SOURCE Short can never be downloaded, no matter
+# how many times it is retried (age-restricted, removed, private, region or
+# copyright blocked). Such videos are marked SKIPPED so the scheduler stops
+# wasting attempts on them.
+PERMANENT_SOURCE_FAILURE_MARKERS: tuple = (
+    "sign in to confirm your age",
+    "age-restricted",
+    "this video is not available",
+    "video unavailable",
+    "private video",
+    "has been removed by the uploader",
+    "not available in your country",
+    "made this video available in your country",
+    "has not made this video available",
+    "blocked it in your country",
+    "blocked it on copyright grounds",
+    "account associated with this video has been terminated",
+    "no longer available due to a copyright claim",
+    "this video has been removed for violating",
+)
+
+
+def is_permanent_source_failure(error: object) -> bool:
+    """True when retrying this source can never succeed."""
+    text = str(error).lower()
+    return any(marker in text for marker in PERMANENT_SOURCE_FAILURE_MARKERS)
+
 
 class ShortsFetcher:
     """Finds and downloads full YouTube Shorts from target channels."""
@@ -103,8 +130,16 @@ class ShortsFetcher:
 
     @staticmethod
     def _is_bot_check_error(error: Exception) -> bool:
-        text = str(error)
-        return "Sign in to confirm" in text or "not a bot" in text
+        """True ONLY for the 'Sign in to confirm you're not a bot' wall - not
+        for 'Sign in to confirm your age', which is a different problem."""
+        text = str(error).lower()
+        return "not a bot" in text
+
+    @staticmethod
+    def _is_age_gate_error(error: Exception) -> bool:
+        """True if YouTube demands an age-verified (18+) sign-in for a video."""
+        text = str(error).lower()
+        return "confirm your age" in text or "age-restricted" in text
 
     @staticmethod
     def _extract_video_id(video_url: str) -> str:
@@ -204,7 +239,13 @@ class ShortsFetcher:
                 if shorts:
                     break  # the /shorts feed gave us enough
             except Exception as e:
-                if self._is_bot_check_error(e):
+                if self._is_age_gate_error(e):
+                    logger.error(
+                        f"Feed {feed} hit an AGE-RESTRICTED video ('Sign in to confirm "
+                        "your age'). Cookies unlock this only when exported from a Google "
+                        "account with verified 18+ age, and they expire quickly."
+                    )
+                elif self._is_bot_check_error(e):
                     logger.error(
                         "YouTube blocked the request ('Sign in to confirm you're not a bot'). "
                         "Set YT_COOKIES_FILE / YT_COOKIES_FROM_BROWSER in .env."
@@ -277,6 +318,17 @@ class ShortsFetcher:
                 )
                 for fragment in output_path.parent.glob(f"{output_path.stem}*.part*"):
                     fragment.unlink(missing_ok=True)
+                if self._is_age_gate_error(e) or is_permanent_source_failure(e):
+                    # Trying other player clients cannot unlock an age-restricted,
+                    # removed, private or region-blocked Short - fail fast so the
+                    # scheduler can mark it SKIPPED and move on.
+                    logger.error(
+                        "This Short can never be downloaded (%s). It is age-restricted, "
+                        "removed, private or region/copyright-blocked; it will be "
+                        "marked SKIPPED.",
+                        e,
+                    )
+                    raise
                 if self._is_bot_check_error(e):
                     logger.error(
                         "YouTube blocked the download ('Sign in to confirm you're not a bot'). "

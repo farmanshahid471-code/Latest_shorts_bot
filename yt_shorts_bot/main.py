@@ -147,6 +147,9 @@ def process_single_url(
                 delete_after_upload=bool(selected.get("delete_after_upload", False)),
                 delete_r2_after_upload=bool(selected.get("delete_r2_after_upload", False)),
                 subtitles_enabled=bool(selected.get("subtitles_enabled", True)),
+                min_gap_minutes=max(
+                    0, int(selected.get("min_minutes_between_uploads") or 0)
+                ),
                 expected_channel=expected,
                 expected_channel_id=str(selected.get("connected_channel_id") or ""),
             )

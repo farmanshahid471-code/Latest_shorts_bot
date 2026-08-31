@@ -25,7 +25,7 @@ from .config import (
     _ENV_FILE,
     logger,
 )
-from .fetcher import ShortsFetcher
+from .fetcher import ShortsFetcher, is_permanent_source_failure
 from .models import StateDB
 from .pathutils import safe_account_slug
 from .reprocessor import ShortReprocessor
@@ -241,7 +241,20 @@ class ShortsRepostScheduler:
                     logger.info("[%s] %s is already claimed by another worker.", name, video_id)
                     continue
                 try:
-                    if not self._wait_for_upload_gap(name, min_gap):
+                    if min_gap > 0 and self._minutes_since_last_upload(name) < min_gap:
+                        # Non-blocking pacing: the old code SLEPT inside the cycle
+                        # until the gap elapsed, freezing every account queued
+                        # behind this one (their windows could close while waiting).
+                        # Defer the remaining Shorts to a later cycle instead.
+                        logger.info(
+                            "[%s] Upload gap not yet elapsed (%.1f of %d min since the "
+                            "last upload); deferring the remaining Shorts on %s to a "
+                            "later cycle.",
+                            name,
+                            self._minutes_since_last_upload(name),
+                            min_gap,
+                            channel_url,
+                        )
                         break
                     attempted += 1
                     uploaded = self._process_one(
@@ -280,37 +293,47 @@ class ShortsRepostScheduler:
                     if self._last_upload_result == UPLOAD_QUOTA_REACHED:
                         break
                 except Exception as exc:
-                    logger.exception("[%s] Failed to repost %s: %s", name, short["url"], exc)
-                    self.state_db.record_video_state(
-                        video_id=video_id,
-                        video_url=short["url"],
-                        title=short["title"],
-                        status="PROCESSING_FAILED",
-                        error_msg=str(exc),
-                        account=name,
-                    )
+                    if is_permanent_source_failure(exc):
+                        # Age-restricted / removed / region-blocked sources can
+                        # never succeed - mark them terminally SKIPPED instead of
+                        # retrying them forever, then continue to the next Short.
+                        logger.warning(
+                            "[%s] %s ('%s') can never be reposted: %s. Marking SKIPPED.",
+                            name,
+                            video_id,
+                            short["title"],
+                            exc,
+                        )
+                        self.state_db.record_video_state(
+                            video_id=video_id,
+                            video_url=short["url"],
+                            title=short["title"],
+                            status="SKIPPED",
+                            error_msg=str(exc)[:500],
+                            account=name,
+                        )
+                    else:
+                        logger.exception("[%s] Failed to repost %s: %s", name, short["url"], exc)
+                        self.state_db.record_video_state(
+                            video_id=video_id,
+                            video_url=short["url"],
+                            title=short["title"],
+                            status="PROCESSING_FAILED",
+                            error_msg=str(exc)[:500],
+                            account=name,
+                        )
                 finally:
                     self.state_db.release_video_claim(video_id, name, claim)
 
         logger.info("[%s] Account cycle finished: %s upload(s).", name, uploaded_count)
         return uploaded_count
 
-    def _wait_for_upload_gap(self, account: str, min_gap_minutes: int) -> bool:
-        if min_gap_minutes <= 0:
-            return not self.stop_event.is_set()
+    def _minutes_since_last_upload(self, account: str) -> float:
+        """Minutes since this account's last REAL upload; infinity if none."""
         last_upload = self.state_db.get_last_upload_time(account)
         if not last_upload:
-            return not self.stop_event.is_set()
-        elapsed = (datetime.now(timezone.utc) - last_upload).total_seconds() / 60.0
-        if elapsed >= min_gap_minutes:
-            return not self.stop_event.is_set()
-        wait_seconds = max(1, int((min_gap_minutes - elapsed) * 60))
-        logger.info(
-            "[%s] Waiting up to %ss for configured upload pacing.",
-            account,
-            wait_seconds,
-        )
-        return not self.stop_event.wait(wait_seconds)
+            return float("inf")
+        return (datetime.now(timezone.utc) - last_upload).total_seconds() / 60.0
 
     @staticmethod
     def _state_for_upload_result(result: Optional[str]) -> str:
