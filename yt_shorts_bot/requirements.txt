@@ -1,5 +1,5 @@
 # Runtime dependencies tested together in August 2026.
-yt-dlp>=2026.8.19,<2027
+yt-dlp[default]>=2026.8.19,<2027
 faster-whisper>=1.2.1,<2
 numpy>=1.26.4,<3
 boto3>=1.43.0,<2

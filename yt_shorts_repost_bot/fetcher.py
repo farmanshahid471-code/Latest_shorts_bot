@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import yt_dlp
 
+from yt_dlp_support import authenticated_youtube_options, run_youtube_dl
+
 from .config import (
     TARGET_CHANNELS,
     FETCH_LIMIT_PER_CHANNEL,
@@ -107,6 +109,10 @@ class ShortsFetcher:
         if browser:
             opts["cookiesfrombrowser"] = (browser,)
             logger.info(f"Using YouTube cookies from browser: {browser}")
+        if opts:
+            # Avoid yt-dlp's currently broken logged-in tv_downgraded default
+            # without giving up the cookies required by age-restricted sources.
+            opts.update(authenticated_youtube_options())
         return opts
 
     @staticmethod
@@ -249,8 +255,13 @@ class ShortsFetcher:
                     **self._timeout_opt(),
                     **self._original_audio_opt(),
                 }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    res = ydl.extract_info(feed, download=False)
+                res = run_youtube_dl(
+                    yt_dlp.YoutubeDL,
+                    ydl_opts,
+                    lambda ydl, feed=feed: ydl.extract_info(feed, download=False),
+                    logger=logger,
+                    context=f"Shorts feed scan for {feed}",
+                )
                 entries = res.get("entries") or []
                 logger.info(f"  {feed}: found {len(entries)} entries")
                 for entry in entries:
@@ -321,66 +332,59 @@ class ShortsFetcher:
         if output_path.exists():
             output_path.unlink()
 
-        # Try several player clients - YouTube serves streams differently per
-        # client, and some (tv/android/ios) avoid HTTP 403 on Shorts.
-        client_attempts = [None, "tv", "android", "ios"]
-        last_err = None
-        for player_client in client_attempts:
-            ydl_opts = {
-                "format": "bestvideo[height<=2160][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
-                          "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-                "outtmpl": str(output_path),
-                "merge_output_format": "mp4",
-                "quiet": True,
-                "no_warnings": True,
-                **self._cookies_opts(),
-                **self._ffmpeg_opt(),
-                **self._timeout_opt(),
-                **self._original_audio_opt(),
-            }
-            if player_client:
-                ydl_opts["extractor_args"] = {
-                    "youtube": {"player_client": [player_client]}
-                }
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([video_url])
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                logger.warning(
-                    "Download attempt (client=%s) failed: %s",
-                    player_client or "default",
+        # Android/iOS clients do not support account cookies, while the TV
+        # clients currently hit YouTube's "page needs to be reloaded" failure.
+        # _cookies_opts therefore uses only default+web_embedded, and the shared
+        # runner drops cookies once only when that path fails for a public Short.
+        ydl_opts = {
+            "format": "bestvideo[height<=2160][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+                      "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "outtmpl": str(output_path),
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "no_warnings": True,
+            **self._cookies_opts(),
+            **self._ffmpeg_opt(),
+            **self._timeout_opt(),
+            **self._original_audio_opt(),
+        }
+        try:
+            run_youtube_dl(
+                yt_dlp.YoutubeDL,
+                ydl_opts,
+                lambda ydl: ydl.download([video_url]),
+                logger=logger,
+                context=f"Short download for {video_url}",
+            )
+        except Exception as e:
+            for fragment in output_path.parent.glob(f"{output_path.stem}*.part*"):
+                fragment.unlink(missing_ok=True)
+            if self._is_age_gate_error(e):
+                # Anonymous or incompatible-client retries cannot replace an
+                # age-verified login. Keep this source retryable for fresh cookies.
+                logger.error(
+                    "This Short is age-restricted. Upload fresh cookies.txt from "
+                    "an age-verified 18+ Google account; it remains retryable: %s",
                     e,
                 )
-                for fragment in output_path.parent.glob(f"{output_path.stem}*.part*"):
-                    fragment.unlink(missing_ok=True)
-                if self._is_age_gate_error(e):
-                    # Player-client retries cannot replace authenticated viewing.
-                    # Keep this source retryable so fresh 18+ cookies can unlock it.
-                    logger.error(
-                        "This Short is age-restricted. Upload fresh cookies.txt from "
-                        "an age-verified 18+ Google account; it remains retryable: %s",
-                        e,
-                    )
-                    raise
-                if is_permanent_source_failure(e):
-                    logger.error(
-                        "This Short can never be downloaded because it was removed, "
-                        "made private, or region/copyright-blocked; it will be marked "
-                        "SKIPPED: %s",
-                        e,
-                    )
-                    raise
-                if self._is_bot_check_error(e):
-                    logger.error(
-                        "YouTube blocked the download ('Sign in to confirm you're not a bot'). "
-                        "Set YT_COOKIES_FILE / YT_COOKIES_FROM_BROWSER in .env."
-                    )
-                    raise
-        if last_err is not None:
-            raise last_err
+            elif is_permanent_source_failure(e):
+                logger.error(
+                    "This Short can never be downloaded because it was removed, "
+                    "made private, or region/copyright-blocked; it will be marked "
+                    "SKIPPED: %s",
+                    e,
+                )
+            elif self._is_bot_check_error(e):
+                logger.error(
+                    "YouTube blocked the download ('Sign in to confirm you're not a bot'). "
+                    "Set YT_COOKIES_FILE / YT_COOKIES_FROM_BROWSER in .env."
+                )
+            raise
+
+        # A failed authenticated attempt may have left a partial before the
+        # anonymous public-source retry succeeded.
+        for fragment in output_path.parent.glob(f"{output_path.stem}*.part*"):
+            fragment.unlink(missing_ok=True)
 
         # yt-dlp may append extensions for merged files; find the real output
         if not output_path.exists():
@@ -411,11 +415,15 @@ class ShortsFetcher:
             "skip_download": True,
             "quiet": True,
             "no_warnings": True,
-            "extractor_args": {"youtube": {"player_client": ["tv"]}},
             **ShortsFetcher._cookies_opts(),
             **ShortsFetcher._ffmpeg_opt(),
             **ShortsFetcher._timeout_opt(),
             **ShortsFetcher._original_audio_opt(),
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(video_url, download=False)
+        return run_youtube_dl(
+            yt_dlp.YoutubeDL,
+            ydl_opts,
+            lambda ydl: ydl.extract_info(video_url, download=False),
+            logger=logger,
+            context=f"Short metadata extraction for {video_url}",
+        )

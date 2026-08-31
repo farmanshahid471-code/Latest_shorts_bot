@@ -89,7 +89,11 @@ def test_fetchers_notice_shared_cookie_upload_without_restart(
 
     assert "cookiefile" not in fetcher_class._cookies_opts()
     shared.write_bytes(VALID_COOKIES)
-    assert fetcher_class._cookies_opts()["cookiefile"] == str(shared)
+    options = fetcher_class._cookies_opts()
+    assert options["cookiefile"] == str(shared)
+    assert options["extractor_args"] == {
+        "youtube": {"player_client": ["default", "web_embedded"]}
+    }
     assert fetcher_class._cookies_look_valid(shared)
 
 

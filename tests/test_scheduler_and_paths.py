@@ -75,6 +75,30 @@ def test_stop_interrupts_initial_loop_and_wait(monkeypatch, tmp_path):
     assert not thread.is_alive()
 
 
+@pytest.mark.parametrize("scheduler_class", [ShortsBotScheduler, ShortsRepostScheduler])
+def test_both_24_7_schedulers_run_a_preflight_cycle_and_stop_safely(
+    monkeypatch, tmp_path, scheduler_class
+):
+    scheduler = scheduler_class(
+        interval_hours=24,
+        accounts=[{"name": "Dry check", "target_channels": [], "enabled": True}],
+        state_db=StateDB(tmp_path / f"{scheduler_class.__name__}.db"),
+    )
+    calls = []
+
+    def one_safe_cycle(*, preflight_oauth=False):
+        calls.append(preflight_oauth)
+        scheduler.stop()
+        return 0
+
+    monkeypatch.setattr(scheduler, "run_single_cycle", one_safe_cycle)
+
+    scheduler.start_24_7_loop()
+
+    assert calls == [True]
+    assert not scheduler._running
+
+
 def test_foreign_windows_paths_become_portable_account_paths(tmp_path):
     resolved = credential_path(
         tmp_path,

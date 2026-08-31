@@ -12,6 +12,8 @@ from uuid import uuid4
 import yt_dlp
 import numpy as np
 
+from yt_dlp_support import authenticated_youtube_options, run_youtube_dl
+
 from .config import (
     TARGET_CHANNELS,
     FETCH_LIMIT_PER_CHANNEL,
@@ -243,6 +245,11 @@ class YouTubeFetcher:
             opts["cookiesfrombrowser"] = (browser,)
             logger.info("Using YouTube cookies from browser: %s", browser)
 
+        if opts:
+            # Logged-in yt-dlp defaults currently select the broken
+            # tv_downgraded client. Keep cookies for age gates, but force the
+            # upstream-recommended authenticated clients instead.
+            opts.update(authenticated_youtube_options())
         return opts
 
     @staticmethod
@@ -333,60 +340,65 @@ class YouTubeFetcher:
         skipped_live = 0
         skipped_short = 0
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                res = ydl.extract_info(url, download=False)
-                if not res:
-                    logger.warning(f"No response from yt-dlp for channel: {channel_url}")
-                    return []
-                entries = res.get("entries", [])
-                for entry in entries:
-                    if not entry:
-                        continue
-                    v_id = entry.get("id")
-                    if not v_id:
-                        continue
-                    title = entry.get("title", f"Video {v_id}")
-                    # Never pick something that is not a finished, seekable video:
-                    # still-airing streams, upcoming premieres/live events, and
-                    # post-live placeholders cannot be clipped and only waste the
-                    # whole cycle when picked as the newest candidate.
-                    live_status = str(entry.get("live_status") or "").strip().lower()
-                    if live_status in LIVE_OR_UPCOMING_STATUSES:
-                        skipped_live += 1
-                        logger.debug(
-                            "Skipping video '%s' (%s) - live status '%s' (not clip-able yet)",
-                            title, v_id, live_status,
-                        )
-                        continue
-                    v_url = entry.get("webpage_url") or entry.get("url") or ""
-                    if not str(v_url).startswith(("http://", "https://")):
-                        v_url = f"https://www.youtube.com/watch?v={v_id}"
-                    duration = entry.get("duration", 0) or 0
-                    if duration <= 0:
-                        # Flat listings carry a duration for every normal upload.
-                        # Zero/none means "not a watchable video yet" (upcoming
-                        # premiere or scheduled live stream). Picking it just
-                        # fails at metadata extraction ("This live event will
-                        # begin in ...").
-                        skipped_live += 1
-                        logger.debug(
-                            "Skipping video '%s' (%s) - no duration yet (upcoming/live)",
-                            title, v_id,
-                        )
-                        continue
-                    # Ignore existing YouTube Shorts (< 60s) or extremely short videos (< 45s)
-                    if duration < 60:
-                        skipped_short += 1
-                        logger.debug(f"Skipping video '{title}' - already a short ({duration}s)")
-                        continue
+            res = run_youtube_dl(
+                yt_dlp.YoutubeDL,
+                ydl_opts,
+                lambda ydl: ydl.extract_info(url, download=False),
+                logger=logger,
+                context=f"channel scan for {channel_url}",
+            )
+            if not res:
+                logger.warning(f"No response from yt-dlp for channel: {channel_url}")
+                return []
+            entries = res.get("entries", [])
+            for entry in entries:
+                if not entry:
+                    continue
+                v_id = entry.get("id")
+                if not v_id:
+                    continue
+                title = entry.get("title", f"Video {v_id}")
+                # Never pick something that is not a finished, seekable video:
+                # still-airing streams, upcoming premieres/live events, and
+                # post-live placeholders cannot be clipped and only waste the
+                # whole cycle when picked as the newest candidate.
+                live_status = str(entry.get("live_status") or "").strip().lower()
+                if live_status in LIVE_OR_UPCOMING_STATUSES:
+                    skipped_live += 1
+                    logger.debug(
+                        "Skipping video '%s' (%s) - live status '%s' (not clip-able yet)",
+                        title, v_id, live_status,
+                    )
+                    continue
+                v_url = entry.get("webpage_url") or entry.get("url") or ""
+                if not str(v_url).startswith(("http://", "https://")):
+                    v_url = f"https://www.youtube.com/watch?v={v_id}"
+                duration = entry.get("duration", 0) or 0
+                if duration <= 0:
+                    # Flat listings carry a duration for every normal upload.
+                    # Zero/none means "not a watchable video yet" (upcoming
+                    # premiere or scheduled live stream). Picking it just
+                    # fails at metadata extraction ("This live event will
+                    # begin in ...").
+                    skipped_live += 1
+                    logger.debug(
+                        "Skipping video '%s' (%s) - no duration yet (upcoming/live)",
+                        title, v_id,
+                    )
+                    continue
+                # Ignore existing YouTube Shorts (< 60s) or extremely short videos (< 45s)
+                if duration < 60:
+                    skipped_short += 1
+                    logger.debug(f"Skipping video '{title}' - already a short ({duration}s)")
+                    continue
 
-                    videos.append({
-                        "video_id": v_id,
-                        "url": v_url,
-                        "title": title,
-                        "duration": duration,
-                        "channel": channel_url,
-                    })
+                videos.append({
+                    "video_id": v_id,
+                    "url": v_url,
+                    "title": title,
+                    "duration": duration,
+                    "channel": channel_url,
+                })
         except Exception as e:
             logger.error(f"Error listing channel {channel_url}: {e}")
 
@@ -468,8 +480,13 @@ class YouTubeFetcher:
             **self._original_audio_opt(),
         }
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
+            info = run_youtube_dl(
+                yt_dlp.YoutubeDL,
+                ydl_opts,
+                lambda ydl: ydl.extract_info(video_url, download=False),
+                logger=logger,
+                context=f"metadata extraction for {video_url}",
+            )
         except Exception as e:
             if self._is_age_gate_error(e):
                 logger.error(
@@ -799,8 +816,13 @@ class YouTubeFetcher:
             **self._timeout_opt(),
             **self._original_audio_opt(),
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            audio_info = ydl.extract_info(video_url, download=False)
+        audio_info = run_youtube_dl(
+            yt_dlp.YoutubeDL,
+            ydl_opts,
+            lambda ydl: ydl.extract_info(video_url, download=False),
+            logger=logger,
+            context=f"audio stream lookup for {video_url}",
+        )
         stream_url = audio_info.get("url")
         if not stream_url:
             raise RuntimeError("No direct audio stream URL available")
@@ -1024,8 +1046,13 @@ class YouTubeFetcher:
 
         # Get a direct audio stream URL (fast - metadata only)
         ydl_opts = {"format": "bestaudio/best", "quiet": True, "no_warnings": True, **self._cookies_opts(), **self._ffmpeg_opt(), **self._timeout_opt(), **self._original_audio_opt()}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
+        info = run_youtube_dl(
+            yt_dlp.YoutubeDL,
+            ydl_opts,
+            lambda ydl: ydl.extract_info(video_url, download=False),
+            logger=logger,
+            context=f"audio-energy stream lookup for {video_url}",
+        )
         stream_url = info.get("url")
         if not stream_url:
             raise RuntimeError("No direct stream URL available")
@@ -1205,8 +1232,13 @@ class YouTubeFetcher:
     def _slice_progressive(self, video_url: str, clip_start: float, clip_end: float, output_path: Path) -> Path:
         """Strategy A: find the best single progressive (combined A/V) mp4 format and slice its URL directly."""
         ydl_opts = {"format": "best[ext=mp4]/best", "quiet": True, "no_warnings": True, **self._cookies_opts(), **self._ffmpeg_opt(), **self._timeout_opt(), **self._original_audio_opt()}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
+        info = run_youtube_dl(
+            yt_dlp.YoutubeDL,
+            ydl_opts,
+            lambda ydl: ydl.extract_info(video_url, download=False),
+            logger=logger,
+            context=f"progressive stream lookup for {video_url}",
+        )
 
         # Prefer yt-dlp's own selection (our format_sort puts the original
         # language track FIRST); fall back to a language-aware manual pick
@@ -1260,8 +1292,13 @@ class YouTubeFetcher:
             **self._timeout_opt(),
             **self._original_audio_opt(),
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
+        info = run_youtube_dl(
+            yt_dlp.YoutubeDL,
+            ydl_opts,
+            lambda ydl: ydl.extract_info(video_url, download=False),
+            logger=logger,
+            context=f"video/audio stream lookup for {video_url}",
+        )
 
         # yt-dlp's selector already picked the pair (format_sort = original
         # language first). Use it when present; otherwise pick manually.
@@ -1340,8 +1377,13 @@ class YouTubeFetcher:
             **self._timeout_opt(),
             **self._original_audio_opt(),
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+        run_youtube_dl(
+            yt_dlp.YoutubeDL,
+            ydl_opts,
+            lambda ydl: ydl.download([video_url]),
+            logger=logger,
+            context=f"full-video download for {video_url}",
+        )
 
         matches = [p for p in TEMP_DIR.glob(f"{full_prefix}.*") if p.stat().st_size > 0]
         if not matches:

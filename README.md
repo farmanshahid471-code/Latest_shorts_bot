@@ -137,6 +137,14 @@ immediately. Age-gated sources remain retryable (`SOURCE_AUTH_REQUIRED`), and
 sources incorrectly marked `SKIPPED` by older builds are automatically requeued.
 Viewer cookies are separate from upload OAuth and must be kept private.
 
+Authenticated yt-dlp requests explicitly use YouTube's `default,web_embedded`
+player clients. This avoids the current broken logged-in `tv_downgraded` path
+without disabling the cookies required by age-gated sources. If that path still
+returns a known player/format failure, the bots retry once without cookies so an
+ordinary public source is not broken by an uploaded cookie file; an age-gated
+source remains authenticated-only. Re-run `setup.bat` / `setup.sh` after updating
+so `yt-dlp[default]` installs the current EJS support.
+
 This only enables access to eligible mature source material. It does not bypass
 private/region/copyright restrictions or YouTube's Community Guidelines. The
 YouTube Data API cannot proactively set YouTube's self-imposed 18+ upload flag;
@@ -249,7 +257,9 @@ wait. An active FFmpeg/API call finishes before shutdown.
 - `WHISPER_LANGUAGE=auto` enables language detection. Set a language code only
   when every source uses it.
 - The repost bot lazily imports Whisper only when captions are requested.
-- yt-dlp client retries use `extractor_args` and partial fragments are removed.
+- Authenticated yt-dlp calls use `default,web_embedded` rather than broken TV or
+  cookie-incompatible mobile clients; public sources get one cookie-free
+  fallback, and partial download fragments are removed.
 
 ## Titles, hashtags and sidecars
 

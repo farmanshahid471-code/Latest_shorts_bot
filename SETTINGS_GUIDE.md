@@ -266,6 +266,13 @@ These cookies authenticate **source viewing only**; upload OAuth is separate.
 Cookies are private credentials, can expire, and must never be committed or
 shared. Refresh the export when age-gated downloads fail again.
 
+The bots retain viewer cookies and force yt-dlp's current safe authenticated
+client combination (`default,web_embedded`) instead of the broken logged-in TV
+path. Known player/format failures get one cookie-free retry for public videos;
+age-restricted videos never treat anonymous access as a replacement for an
+age-verified login. After updating an existing installation, re-run its setup
+script so the `yt-dlp[default]` EJS components are installed.
+
 Access to an age-restricted source does not override YouTube's Community
 Guidelines or copyright rules. The YouTube Data API does not offer upload clients
 a writable self-age-restriction field. YouTube may classify an uploaded video,

@@ -229,26 +229,46 @@ class FakeYDL:
         output = Path(self.opts["outtmpl"])
         if self.__class__.attempts == 1:
             Path(str(output) + ".part").write_bytes(b"partial")
-            raise RuntimeError("first client failed")
+            raise RuntimeError("Requested format is not available")
         output.write_bytes(b"complete")
 
     def extract_info(self, _url, download=False):
         return {"id": "abcdefghijk", "title": "T"}
 
 
-def test_yt_dlp_player_retries_use_extractor_args_and_clean_parts(
+def test_yt_dlp_authenticated_download_uses_safe_clients_then_public_fallback(
     monkeypatch, tmp_path
 ):
     FakeYDL.seen = []
     FakeYDL.attempts = 0
     monkeypatch.setattr(fetcher_module.yt_dlp, "YoutubeDL", FakeYDL)
+    monkeypatch.setattr(
+        ShortsFetcher,
+        "_cookies_opts",
+        staticmethod(
+            lambda: {
+                "cookiefile": str(tmp_path / "cookies.txt"),
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["default", "web_embedded"]
+                    }
+                },
+            }
+        ),
+    )
     monkeypatch.setattr(ShortsFetcher, "_probe_duration", staticmethod(lambda _path: 30.0))
     monkeypatch.setattr(fetcher_module, "TEMP_DIR", tmp_path)
     output = ShortsFetcher().download_short("https://www.youtube.com/shorts/abcdefghijk")
     assert output.read_bytes() == b"complete"
-    assert "extractor_args" not in FakeYDL.seen[0]
-    assert FakeYDL.seen[1]["extractor_args"] == {
-        "youtube": {"player_client": ["tv"]}
+    assert FakeYDL.seen[0]["cookiefile"].endswith("cookies.txt")
+    assert FakeYDL.seen[0]["extractor_args"] == {
+        "youtube": {"player_client": ["default", "web_embedded"]}
     }
+    assert "cookiefile" not in FakeYDL.seen[1]
+    assert "extractor_args" not in FakeYDL.seen[1]
+    assert all(
+        "tv" not in opts.get("extractor_args", {}).get("youtube", {}).get("player_client", [])
+        for opts in FakeYDL.seen
+    )
     assert not list(tmp_path.glob("*.part*"))
     assert "_" in output.stem  # random job suffix avoids cross-account collisions
