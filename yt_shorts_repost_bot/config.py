@@ -56,8 +56,8 @@ YTDL_SOCKET_TIMEOUT_SEC: float = float(os.getenv("YTDL_SOCKET_TIMEOUT_SEC", "25"
 # (spreads uploads across channels; total is still capped by MAX_DAILY_UPLOADS)
 MAX_SHORTS_PER_CHANNEL_CYCLE: int = int(os.getenv("MAX_SHORTS_PER_CHANNEL_CYCLE", "2"))
 
-# What counts as a Short (YouTube Shorts are <= 60 seconds)
-MAX_SHORT_DURATION_SEC: int = int(os.getenv("MAX_SHORT_DURATION_SEC", "60"))
+# Source duration is intentionally unrestricted. Videos discovered on a
+# configured feed or submitted directly are downloaded in full.
 
 # --- PROCESSING MODE ---
 # "copy"  = download the Short and re-encode it to a clean mp4 (h264+aac),

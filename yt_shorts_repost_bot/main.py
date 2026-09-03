@@ -70,13 +70,8 @@ def repost_one_url(url: str, account: Optional[dict] = None) -> bool:
         info = fetcher.get_short_info(url)
         video_id = str(info.get("id") or fetcher._extract_video_id(url))
         video_title = str(info.get("title") or f"Short {video_id}")
-        duration = float(info.get("duration") or 0)
-        from .config import MAX_SHORT_DURATION_SEC
-
-        if duration > MAX_SHORT_DURATION_SEC + 1:
-            raise ValueError(
-                f"This video is {duration:.1f}s, longer than the configured Short limit"
-            )
+        # Source duration is intentionally unrestricted. YouTube decides whether
+        # the uploaded result is surfaced as a Short or a regular video.
 
         db = StateDB()
         if db.is_video_processed(video_id, name):

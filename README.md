@@ -4,8 +4,10 @@ This repository contains two independent Python applications:
 
 - **`yt_shorts_bot`** selects high-engagement 15–20 second windows from regular
   YouTube videos, transcribes them, renders vertical clips, and uploads them.
-- **`yt_shorts_repost_bot`** downloads complete Shorts and either cleanly
-  re-encodes them (`copy`) or renders overlays/captions/music (`render`).
+- **`yt_shorts_repost_bot`** downloads complete source videos without an old
+  60-second cutoff and either cleanly re-encodes them (`copy`) or renders
+  overlays/captions/music (`render`). YouTube determines whether each upload is
+  surfaced as a Short or a regular video.
 
 Only process and upload media you own or have permission to reuse.
 
@@ -198,8 +200,8 @@ so this is a live validity check rather than an expiry forecast. See
 ## Repost-bot pipeline
 
 ```text
-Shorts feed scan
-  -> full Short download and duration verification
+configured feed scan
+  -> full source download (no local source-duration cutoff)
   -> copy mode OR render mode
   -> local review copy
   -> optional R2 backup
@@ -263,16 +265,19 @@ wait. An active FFmpeg/API call finishes before shutdown.
 
 ## Titles, hashtags and sidecars
 
-Metadata is deliberately user-controlled:
+Title behavior is account-controlled:
 
 ```text
-{title_prefix} {clean source title} {title_hashtags}
+smart_titles=false: {title_prefix} {clean source title} {title_hashtags}
+smart_titles=true:  {title_prefix} {spoken clip hook} {title_hashtags}
 ```
 
-The bot does not infer or silently add reach/content hashtags. Legacy
-`smart_titles` configuration names are accepted for compatibility but do not
-change that guarantee. A clean source-channel handle may be added as a YouTube
-API tag; generic URL suffixes such as `/shorts` and `/videos` are excluded.
+For the clip bot, smart-title transcription is generated even when burned-in
+subtitles are disabled, so the selected moment gets its own title instead of
+silently copying the long source title. The bot never infers or silently adds
+reach/content hashtags: only configured hashtags are published. A clean
+source-channel handle may be added as a YouTube API tag; generic URL suffixes
+such as `/shorts` and `/videos` are excluded.
 
 Each `.txt` sidecar is generated from the exact metadata object used by the
 upload attempt, including prefix, part label and account hashtags.

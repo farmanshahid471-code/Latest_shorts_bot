@@ -18,6 +18,7 @@ from .config import (
     CYCLE_INTERVAL_HOURS,
     DELETE_AFTER_UPLOAD,
     DELETE_R2_AFTER_UPLOAD,
+    ENABLE_SMART_TITLES,
     KEEP_LOCAL_SHORTS,
     KEEP_SHORTS_DIR,
     SELECTION_ORDER,
@@ -631,6 +632,9 @@ class ShortsBotScheduler:
         uploaded_count = 0
         part_ids: list[str] = []
         account_slug = safe_account_slug(account)
+        smart_title_enabled = (
+            ENABLE_SMART_TITLES if smart_titles is None else bool(smart_titles)
+        )
 
         for index, window in enumerate(windows, start=1):
             if self.stop_event.is_set():
@@ -670,6 +674,44 @@ class ShortsBotScheduler:
             try:
                 raw_path = self._download_window(video_url, start, end)
                 srt_path = raw_path.with_suffix(".srt")
+
+                # Smart titles need the words spoken inside THIS selected clip.
+                # Previously transcription was only a side effect of burning
+                # subtitles, so disabling captions silently made smart titles
+                # copy the long source video's original title. Generate the SRT
+                # independently whenever smart titles are enabled; the renderer
+                # reuses it when captions are also enabled.
+                transcribe = getattr(
+                    self.processor, "transcribe_and_generate_srt", None
+                )
+                probe_audio = getattr(self.processor, "_probe_has_audio", None)
+                if smart_title_enabled and callable(transcribe):
+                    has_audio = (
+                        bool(probe_audio(raw_path))
+                        if callable(probe_audio)
+                        else True
+                    )
+                    if has_audio:
+                        try:
+                            generated_srt = transcribe(raw_path, srt_path=srt_path)
+                            if generated_srt:
+                                srt_path = Path(generated_srt)
+                        except Exception as exc:
+                            if subtitles_enabled is not False:
+                                raise
+                            logger.warning(
+                                "[%s] Smart-title transcription failed; using the "
+                                "clean source title for this clip: %s",
+                                account,
+                                exc,
+                            )
+                    else:
+                        logger.warning(
+                            "[%s] Smart titles are enabled but this clip has no "
+                            "audio; using the clean source title.",
+                            account,
+                        )
+
                 processed_path = raw_path.parent / (
                     f"processed_{raw_path.stem}_{uuid4().hex[:10]}.mp4"
                 )
@@ -700,6 +742,20 @@ class ShortsBotScheduler:
                     logger.error("[%s] Optional R2 backup failed: %s", account, exc)
 
                 transcript_text = srt_to_text(srt_path) if srt_path else ""
+                if smart_title_enabled:
+                    if transcript_text:
+                        logger.info(
+                            "[%s] Smart title will use %d characters transcribed "
+                            "from the selected clip.",
+                            account,
+                            len(transcript_text),
+                        )
+                    else:
+                        logger.warning(
+                            "[%s] Smart titles are enabled but no spoken transcript "
+                            "was produced; using the clean source title.",
+                            account,
+                        )
                 self.state_db.record_video_state(
                     video_id=part_id,
                     video_url=video_url,

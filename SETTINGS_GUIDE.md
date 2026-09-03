@@ -35,8 +35,10 @@ One tab is one destination channel. Settings are stored in ignored
 | `delete_r2_after_upload` | Delete optional R2 backup after a real upload only. |
 
 The repost bot additionally uses `process_mode` (`copy` or `render`) and
-`max_shorts_per_channel_cycle`. The clip bot uses `shorts_per_video` and optional
-logo-removal fields.
+`max_shorts_per_channel_cycle`. It does not enforce a source-duration cutoff;
+longer feed items and direct URLs are downloaded and uploaded in full, while
+YouTube decides whether the result qualifies for Shorts presentation. The clip
+bot uses `shorts_per_video` and optional logo-removal fields.
 
 ### Posting-window examples
 
@@ -281,12 +283,14 @@ it in YouTube Studio and set **Age restriction (advanced)** there.
 
 ## Metadata guarantee
 
-The published title is:
+The published title is account-controlled:
 
 ```text
-{title_prefix} {clean source title} {user title_hashtags}
+smart_titles=false: {title_prefix} {clean source title} {user title_hashtags}
+smart_titles=true:  {title_prefix} {spoken clip hook} {user title_hashtags}
 ```
 
-No reach/content hashtags are inferred. Legacy `smart_titles` names remain for
-file compatibility but do not change this behavior. Metadata sidecars use the
-exact metadata object used for the upload attempt.
+The clip bot transcribes the selected clip for its smart title independently of
+whether burned subtitles are enabled. If the clip has no usable speech, it
+falls back to the clean source title. No reach/content hashtags are inferred.
+Metadata sidecars use the exact metadata object used for the upload attempt.

@@ -17,7 +17,6 @@ from .config import (
     FETCH_LIMIT_PER_CHANNEL,
     FETCH_SCAN_LIMIT,
     YTDL_SOCKET_TIMEOUT_SEC,
-    MAX_SHORT_DURATION_SEC,
     FFMPEG_PATH,
     FFPROBE_PATH,
     YT_COOKIES_FILE,
@@ -271,20 +270,21 @@ class ShortsFetcher:
                     if not v_id or v_id in seen:
                         continue
                     duration = entry.get("duration") or 0
-                    # Keep only Shorts: <= 60s (or unknown -> keep, verify later)
-                    if 0 < duration <= MAX_SHORT_DURATION_SEC or not duration:
-                        seen.add(v_id)
-                        shorts.append({
-                            "video_id": v_id,
-                            "url": (
-                                entry.get("webpage_url")
-                                if str(entry.get("webpage_url") or "").startswith(("http://", "https://"))
-                                else f"https://www.youtube.com/shorts/{v_id}"
-                            ),
-                            "title": entry.get("title", f"Short {v_id}"),
-                            "duration": duration,
-                            "channel": channel_url,
-                        })
+                    # Do not infer Shorts eligibility from the old 60-second
+                    # rule. YouTube feeds now contain longer Shorts, and direct
+                    # source URLs may intentionally point to longer videos.
+                    seen.add(v_id)
+                    shorts.append({
+                        "video_id": v_id,
+                        "url": (
+                            entry.get("webpage_url")
+                            if str(entry.get("webpage_url") or "").startswith(("http://", "https://"))
+                            else f"https://www.youtube.com/shorts/{v_id}"
+                        ),
+                        "title": entry.get("title", f"Short {v_id}"),
+                        "duration": duration,
+                        "channel": channel_url,
+                    })
                 if shorts:
                     break  # the /shorts feed gave us enough
             except Exception as e:
@@ -302,8 +302,6 @@ class ShortsFetcher:
                 else:
                     logger.warning(f"Could not read feed {feed}: {e}")
 
-        # Filter out anything longer than a Short (when duration was unknown in the feed)
-        shorts = [s for s in shorts if not s["duration"] or s["duration"] <= MAX_SHORT_DURATION_SEC]
         # The tab feeds always arrive newest-first. Apply the order HERE so every
         # caller gets the same guaranteed ordering (oldest needs the deeper
         # window fetched above - reversing the newest N is NOT the true oldest).
@@ -397,14 +395,13 @@ class ShortsFetcher:
             output_path = max(matches, key=lambda p: p.stat().st_size)
 
         duration = self._probe_duration(output_path)
-        if duration is not None and duration > MAX_SHORT_DURATION_SEC + 1.0:
-            output_path.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"Downloaded video is {duration:.1f}s, longer than the configured "
-                f"Short limit ({MAX_SHORT_DURATION_SEC}s)"
+        if duration is not None:
+            logger.info(
+                "Downloaded source duration: %.1fs (source duration is unrestricted).",
+                duration,
             )
         size_mb = output_path.stat().st_size / (1024 * 1024)
-        logger.info("Downloaded Short (%.2f MB): %s", size_mb, output_path)
+        logger.info("Downloaded source video (%.2f MB): %s", size_mb, output_path)
         return output_path
 
     # ------------------------------------------------------------------
