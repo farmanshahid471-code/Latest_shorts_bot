@@ -44,6 +44,7 @@ from .main import process_single_url
 from .pathutils import credential_path, relative_credential_value, safe_account_slug
 from .runtime import PIPELINE_LOCK
 from .timewindows import US_TIMEZONES, validate_posting_window
+from .social_tiktok import PRIVACY_LEVELS as TIKTOK_PRIVACY_LEVELS
 
 _jobs: dict = {}
 _scheduler_thread = None
@@ -343,6 +344,13 @@ def _account_state(a: dict, db: StateDB) -> dict:
         "posting_end_time": a.get("posting_end_time", ""),
         "delete_after_upload": a.get("delete_after_upload", None),
         "delete_r2_after_upload": a.get("delete_r2_after_upload", None),
+        "instagram_enabled": a.get("instagram_enabled", None),
+        "instagram_ig_user_id": a.get("instagram_ig_user_id", ""),
+        "instagram_has_token": bool(str(a.get("instagram_access_token") or "").strip()),
+        "tiktok_enabled": a.get("tiktok_enabled", None),
+        "tiktok_open_id": a.get("tiktok_open_id", ""),
+        "tiktok_has_token": bool(str(a.get("tiktok_access_token") or "").strip()),
+        "tiktok_privacy_level": a.get("tiktok_privacy_level", ""),
     }
 
 
@@ -442,13 +450,19 @@ def _clean_account(acc: dict) -> dict:
                 "extra_hashtags", "title_prefix", "title_hashtags", "smart_titles", "custom_description",
                 "spread_uploads_across_window",
                 "max_shorts_per_channel_cycle", "connected_channel", "connected_channel_id",
-                "subtitles_enabled", "expected_channel"]:
+                "subtitles_enabled", "expected_channel",
+                "instagram_enabled", "instagram_ig_user_id", "instagram_access_token",
+                "instagram_app_id", "instagram_app_secret",
+                "tiktok_enabled", "tiktok_open_id", "tiktok_access_token",
+                "tiktok_refresh_token", "tiktok_client_key", "tiktok_client_secret",
+                "tiktok_privacy_level"]:
         if opt not in acc:
             continue
         val = acc[opt]
         if opt in ("watermark_enabled", "top_watermark_enabled", "smart_titles",
                    "delete_after_upload", "delete_r2_after_upload",
-                   "subtitles_enabled", "spread_uploads_across_window"):
+                   "subtitles_enabled", "spread_uploads_across_window",
+                   "instagram_enabled", "tiktok_enabled"):
             # accept real bools AND the strings "true"/"false"/"0"/"1"
             if isinstance(val, bool):
                 entry[opt] = val
@@ -457,6 +471,11 @@ def _clean_account(acc: dict) -> dict:
         elif val is not None:
             # store empty strings too (so e.g. resetting order back to "" works)
             entry[opt] = val
+    if "tiktok_privacy_level" in entry:
+        level = str(entry["tiktok_privacy_level"] or "").strip()
+        entry["tiktok_privacy_level"] = (
+            level if level in TIKTOK_PRIVACY_LEVELS else "PUBLIC_TO_EVERYONE"
+        )
     window_error = validate_posting_window(entry)
     if window_error:
         raise ValueError(window_error)
@@ -780,6 +799,115 @@ def create_app(testing: bool = False) -> Flask:
         _spawn_job("test-youtube", _do)
         return _redirect_msg("Auth started - a browser tab may open for login. Watch the logs.", account=redir_name)
 
+    # ---------------- CROSS-POSTING (Instagram + TikTok) ----------------
+    @app.post("/api/social/save")
+    def api_social_save():
+        name = (_f(request, "account") or "").strip()
+        if not _valid_account_name(name):
+            return _redirect_msg("Invalid account name.", ok=False)
+        try:
+            data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8")) if ACCOUNTS_FILE.exists() else {}
+        except Exception:
+            data = {}
+        accounts = data.get("accounts", []) if isinstance(data, dict) else []
+        low = name.lower()
+        acc = next((a for a in accounts if str(a.get("name") or "").strip().lower() == low), None)
+        if acc is None:
+            acc = {"name": name, "target_channels": [], "max_daily_uploads": 10, "enabled": True}
+            accounts.append(acc)
+        payload = request.json if request.is_json else None
+
+        def _present(key: str) -> bool:
+            return key in request.form or (payload is not None and key in (payload or {}))
+
+        # Enable toggles are presence-based, so saving any other settings form
+        # can never silently switch cross-posting off.
+        for field in ("instagram_enabled", "tiktok_enabled"):
+            if _present(field):
+                raw = _f(request, field)
+                if isinstance(raw, bool):
+                    acc[field] = raw
+                else:
+                    acc[field] = str(raw or "").strip().lower() in ("true", "on", "1", "yes")
+        # Plain IDs: an empty value clears the field.
+        for field in ("instagram_ig_user_id", "instagram_app_id",
+                      "tiktok_open_id", "tiktok_client_key"):
+            if _present(field):
+                acc[field] = str(_f(request, field) or "").strip()
+        # Secrets: only overwrite when a non-empty value is submitted, so the
+        # panel never needs to echo them back into the page to keep them.
+        for field in ("instagram_access_token", "instagram_app_secret",
+                      "tiktok_access_token", "tiktok_refresh_token",
+                      "tiktok_client_secret"):
+            if _present(field):
+                value = str(_f(request, field) or "").strip()
+                if value:
+                    acc[field] = value
+        if _present("tiktok_privacy_level"):
+            level = str(_f(request, "tiktok_privacy_level") or "").strip()
+            if level in TIKTOK_PRIVACY_LEVELS:
+                acc["tiktok_privacy_level"] = level
+        _write_accounts(accounts)
+        logger.info("[webui] Saved cross-posting settings for account '%s' (secrets not logged).", name)
+        return _redirect_msg(f"Cross-posting settings saved for account '{name}'.", account=name)
+
+    @app.post("/api/test-instagram")
+    def api_test_instagram():
+        acc_name = (_f(request, "account") or "").strip()
+        acc = _find_account(acc_name) if acc_name else None
+        if acc is None:
+            return _redirect_msg("Choose the account tab to test first.", ok=False)
+        target = dict(acc)
+
+        def _do():
+            try:
+                from .social_instagram import InstagramReelsUploader
+
+                ok, detail = InstagramReelsUploader(
+                    ig_user_id=str(target.get("instagram_ig_user_id") or ""),
+                    access_token=str(target.get("instagram_access_token") or ""),
+                    app_id=str(target.get("instagram_app_id") or ""),
+                    app_secret=str(target.get("instagram_app_secret") or ""),
+                ).check_connection()
+                if ok:
+                    logger.info("[webui] ✅ Instagram check for '%s': %s", target.get("name"), detail)
+                else:
+                    logger.warning("[webui] ⚠️ Instagram check for '%s' failed: %s", target.get("name"), detail)
+            except Exception as exc:
+                logger.error("[webui] Instagram check error for '%s': %s", target.get("name"), exc)
+
+        _spawn_job("test-instagram", _do)
+        return _redirect_msg("Testing Instagram - watch the logs.", account=target.get("name"))
+
+    @app.post("/api/test-tiktok")
+    def api_test_tiktok():
+        acc_name = (_f(request, "account") or "").strip()
+        acc = _find_account(acc_name) if acc_name else None
+        if acc is None:
+            return _redirect_msg("Choose the account tab to test first.", ok=False)
+        target = dict(acc)
+
+        def _do():
+            try:
+                from .social_tiktok import TikTokUploader
+
+                ok, detail = TikTokUploader(
+                    open_id=str(target.get("tiktok_open_id") or ""),
+                    access_token=str(target.get("tiktok_access_token") or ""),
+                    refresh_token=str(target.get("tiktok_refresh_token") or ""),
+                    client_key=str(target.get("tiktok_client_key") or ""),
+                    client_secret=str(target.get("tiktok_client_secret") or ""),
+                ).check_connection()
+                if ok:
+                    logger.info("[webui] ✅ TikTok check for '%s': %s", target.get("name"), detail)
+                else:
+                    logger.warning("[webui] ⚠️ TikTok check for '%s' failed: %s", target.get("name"), detail)
+            except Exception as exc:
+                logger.error("[webui] TikTok check error for '%s': %s", target.get("name"), exc)
+
+        _spawn_job("test-tiktok", _do)
+        return _redirect_msg("Testing TikTok - watch the logs.", account=target.get("name"))
+
     # ---------------- ACCOUNT SETTINGS (per-account) ----------------
     @app.post("/api/account-settings/save")
     def api_account_settings_save():
@@ -916,7 +1044,13 @@ def create_app(testing: bool = False) -> Flask:
                              "posting_start_time", "posting_end_time", "delete_after_upload",
                              "delete_r2_after_upload", "connected_channel", "connected_channel_id",
                              "subtitles_enabled", "expected_channel", "custom_description",
-                             "spread_uploads_across_window"]:
+                             "spread_uploads_across_window",
+                             "instagram_enabled", "instagram_ig_user_id",
+                             "instagram_access_token", "instagram_app_id",
+                             "instagram_app_secret", "tiktok_enabled",
+                             "tiktok_open_id", "tiktok_access_token",
+                             "tiktok_refresh_token", "tiktok_client_key",
+                             "tiktok_client_secret", "tiktok_privacy_level"]:
                     if keep in old and keep not in acc:
                         acc[keep] = old[keep]
             accounts.append(acc)
@@ -1111,6 +1245,99 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
     }
 
     chk = lambda v: " checked" if v else ""
+
+    # -------- cross-posting (Instagram + TikTok) for the active tab --------
+    # Secrets are NEVER echoed back: the form only shows whether one is saved,
+    # and submitting a blank secret field keeps the stored value.
+    soc = {
+        "instagram_enabled": bool(loaded_acc.get("instagram_enabled")),
+        "instagram_ig_user_id": str(loaded_acc.get("instagram_ig_user_id") or ""),
+        "instagram_has_token": bool(str(loaded_acc.get("instagram_access_token") or "").strip()),
+        "instagram_app_id": str(loaded_acc.get("instagram_app_id") or ""),
+        "instagram_has_app_secret": bool(str(loaded_acc.get("instagram_app_secret") or "").strip()),
+        "tiktok_enabled": bool(loaded_acc.get("tiktok_enabled")),
+        "tiktok_open_id": str(loaded_acc.get("tiktok_open_id") or ""),
+        "tiktok_has_token": bool(str(loaded_acc.get("tiktok_access_token") or "").strip()),
+        "tiktok_has_refresh": bool(str(loaded_acc.get("tiktok_refresh_token") or "").strip()),
+        "tiktok_client_key": str(loaded_acc.get("tiktok_client_key") or ""),
+        "tiktok_has_client_secret": bool(str(loaded_acc.get("tiktok_client_secret") or "").strip()),
+        "tiktok_privacy_level": str(loaded_acc.get("tiktok_privacy_level") or "PUBLIC_TO_EVERYONE"),
+    }
+    if soc["instagram_enabled"] and soc["instagram_ig_user_id"] and soc["instagram_has_token"]:
+        ig_badge = '<span class="badge ok">Instagram: on</span>'
+    elif soc["instagram_enabled"]:
+        ig_badge = '<span class="badge warn">Instagram: on but incomplete</span>'
+    else:
+        ig_badge = '<span class="badge">Instagram: off</span>'
+    if soc["tiktok_enabled"] and soc["tiktok_open_id"] and soc["tiktok_has_token"]:
+        tt_badge = '<span class="badge ok">TikTok: on</span>'
+    elif soc["tiktok_enabled"]:
+        tt_badge = '<span class="badge warn">TikTok: on but incomplete</span>'
+    else:
+        tt_badge = '<span class="badge">TikTok: off</span>'
+    privacy_options = "".join(
+        f'<option value="{level}"{" selected" if soc["tiktok_privacy_level"] == level else ""}>'
+        f"{_esc(level.replace('_', ' ').title())}</option>"
+        for level in TIKTOK_PRIVACY_LEVELS
+    )
+
+    def _secret_hint(has_value: bool, empty_hint: str) -> str:
+        return "saved ✓ (leave blank to keep)" if has_value else empty_hint
+
+    social_card = f"""
+    <div class="card" style="margin-top:16px;">
+      <h2 style="font-size:14px;">📣 Cross-post to Instagram &amp; TikTok {ig_badge} {tt_badge}</h2>
+      <div class="hint">After each Short is rendered, the bot ALSO posts it here — even when the
+        YouTube upload waits on quota or fails. Uses the official Meta + TikTok APIs
+        (no password logins). Full setup steps: <b>SETUP_INSTAGRAM_TIKTOK.md</b>.</div>
+      <form action="/api/social/save" method="POST">
+        <input type="hidden" name="account" value="{_esc(loaded_account)}">
+        <table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:6px;">
+          <tr><td style="padding:4px 0;width:38%;">Post to Instagram Reels</td>
+              <td><input type="checkbox" name="instagram_enabled" value="true"{chk(soc["instagram_enabled"])} style="transform:scale(1.3);"></td></tr>
+          <tr><td style="padding:4px 0;">Instagram user ID</td>
+              <td><input type="text" name="instagram_ig_user_id" value="{_esc(soc["instagram_ig_user_id"])}" placeholder="e.g. 178414..." style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">Instagram access token</td>
+              <td><input type="password" name="instagram_access_token" value="" placeholder="{_secret_hint(soc["instagram_has_token"], "paste a long-lived token")}" style="width:100%;" autocomplete="off"></td></tr>
+          <tr><td style="padding:4px 0;">Meta app ID (optional, enables token auto-refresh)</td>
+              <td><input type="text" name="instagram_app_id" value="{_esc(soc["instagram_app_id"])}" style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">Meta app secret (optional)</td>
+              <td><input type="password" name="instagram_app_secret" value="" placeholder="{_secret_hint(soc["instagram_has_app_secret"], "only needed for auto-refresh")}" style="width:100%;" autocomplete="off"></td></tr>
+          <tr><td style="padding:4px 0;">Post to TikTok</td>
+              <td><input type="checkbox" name="tiktok_enabled" value="true"{chk(soc["tiktok_enabled"])} style="transform:scale(1.3);"></td></tr>
+          <tr><td style="padding:4px 0;">TikTok open_id</td>
+              <td><input type="text" name="tiktok_open_id" value="{_esc(soc["tiktok_open_id"])}" style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">TikTok access token (expires ~24h)</td>
+              <td><input type="password" name="tiktok_access_token" value="" placeholder="{_secret_hint(soc["tiktok_has_token"], "paste an access token")}" style="width:100%;" autocomplete="off"></td></tr>
+          <tr><td style="padding:4px 0;">TikTok refresh token (enables auto-renewal)</td>
+              <td><input type="password" name="tiktok_refresh_token" value="" placeholder="{_secret_hint(soc["tiktok_has_refresh"], "paste a refresh token")}" style="width:100%;" autocomplete="off"></td></tr>
+          <tr><td style="padding:4px 0;">TikTok client key</td>
+              <td><input type="text" name="tiktok_client_key" value="{_esc(soc["tiktok_client_key"])}" style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">TikTok client secret</td>
+              <td><input type="password" name="tiktok_client_secret" value="" placeholder="{_secret_hint(soc["tiktok_has_client_secret"], "needed for auto-renewal")}" style="width:100%;" autocomplete="off"></td></tr>
+          <tr><td style="padding:4px 0;">TikTok privacy</td>
+              <td><select name="tiktok_privacy_level" style="width:100%;">{privacy_options}</select></td></tr>
+        </table>
+        <div class="row" style="margin-top:10px;"><button type="submit">Save cross-posting</button></div>
+      </form>
+      <div class="row" style="margin-top:10px;">
+        <form action="/api/test-instagram" method="POST" style="display:inline;">
+          <input type="hidden" name="account" value="{_esc(loaded_account)}">
+          <button class="green" type="submit">Test Instagram</button>
+        </form>
+        <form action="/api/test-tiktok" method="POST" style="display:inline;">
+          <input type="hidden" name="account" value="{_esc(loaded_account)}">
+          <button class="green" type="submit">Test TikTok</button>
+        </form>
+      </div>
+      <div class="hint" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:8px;">
+        Instagram needs the R2 backup enabled plus <b>R2_PUBLIC_BASE_URL</b> in .env — Meta's
+        servers fetch the video from that public URL (25 Reels/day limit). TikTok uploads the
+        file directly; the refresh token + client key/secret renew its ~24h access token
+        automatically. Secrets live in the ignored accounts.json and are never shown back.
+      </div>
+    </div>
+    """
     if mode["live"]:
         mode_badge = '<span class="badge ok">Mode: LIVE</span>'
     elif mode["dry_run"]:
@@ -1242,7 +1469,7 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
   button.gray {{ background:var(--card2); border:1px solid var(--border); color:var(--text); }} button.green {{ background:var(--green); color:#04120a; }}
   button.red {{ background:var(--red); }}
   .row {{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
-  input[type=text], input[type=time], input[type=number], textarea, select {{ background:var(--card2); border:1px solid var(--border); color:var(--text);
+  input[type=text], input[type=password], input[type=time], input[type=number], textarea, select {{ background:var(--card2); border:1px solid var(--border); color:var(--text);
     border-radius:10px; padding:10px 12px; font-size:14px; }}
   input[type=text] {{ flex:1; min-width:200px; }} input[type=file] {{ color:var(--muted); font-size:13px; }}
   .hint {{ font-size:12px; color:var(--muted); margin-top:8px; line-height:1.5; }}
@@ -1352,6 +1579,8 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
         </div>
       </div>
     </div>
+
+    {social_card}
 
     <div class="card">
       <h2 style="font-size:14px;">⚙️ Settings for this account</h2>

@@ -341,6 +341,7 @@ class ShortsRepostScheduler:
                         expected_channel_id=expected_channel_id,
                         aspect=aspect,
                         fill=fill,
+                        account_config=account,
                     )
                     uploaded_count += int(uploaded)
                     if self._last_upload_result == UPLOAD_QUOTA_REACHED:
@@ -509,6 +510,7 @@ class ShortsRepostScheduler:
         aspect: Optional[str] = None,
         fill: Optional[str] = None,
         publish_at: Optional[datetime] = None,
+        account_config: Optional[dict] = None,
     ) -> bool:
         fetcher = fetcher or ShortsFetcher()
         reprocessor = reprocessor or ShortReprocessor()
@@ -609,6 +611,20 @@ class ShortsRepostScheduler:
                     account=account,
                 )
 
+            # Cross-post to Instagram/TikTok. Independent of the YouTube
+            # result above: a quota wait or failed YouTube upload never
+            # blocks the social post. Runs BEFORE the temp-file cleanup
+            # below and before any R2-backup deletion, so the platforms
+            # can always fetch the finished video.
+            self._crosspost_to_social(
+                account_config=account_config,
+                account=account,
+                video_id=video_id,
+                video_path=final_path,
+                r2_key=uploaded_key,
+                metadata=metadata,
+            )
+
             if is_real_upload_id(short_id):
                 if delete_after_upload and local_copy:
                     for path in (local_copy, local_copy.with_suffix(".txt")):
@@ -631,6 +647,33 @@ class ShortsRepostScheduler:
             return False
         finally:
             self.storage.cleanup_local_files(raw_path, final_path)
+
+    def _crosspost_to_social(
+        self,
+        account_config: Optional[dict],
+        account: str,
+        video_id: str,
+        video_path: Optional[Path],
+        r2_key: Optional[str],
+        metadata: Optional[dict],
+    ) -> dict:
+        """Post the finished Short to enabled Instagram/TikTok accounts.
+
+        Never raises: a social failure is recorded in social_posts and the
+        YouTube flow continues untouched.
+        """
+        if not account_config:
+            return {}
+        try:
+            from .social import SocialDestinations
+
+            poster = SocialDestinations(state_db=self.state_db, storage=self.storage)
+            return poster.crosspost(
+                account_config, video_id, video_path, r2_key, metadata or {}
+            )
+        except Exception as exc:
+            logger.warning("[%s] Social cross-post skipped: %s", account, exc)
+            return {}
 
     def _next_wait_seconds(self, interval_hours: int) -> float:
         base_wait = max(60.0, float(interval_hours) * 3600.0)

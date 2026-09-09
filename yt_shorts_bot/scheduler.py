@@ -389,6 +389,7 @@ class ShortsBotScheduler:
                         ),
                         expected_channel=expected_channel,
                         expected_channel_id=expected_channel_id,
+                        account_config=account,
                     )
                     handled = True
                 except Exception as exc:
@@ -625,6 +626,7 @@ class ShortsBotScheduler:
         publish_time_fn: Optional[Callable[[], Optional[datetime]]] = None,
         expected_channel: Optional[str] = None,
         expected_channel_id: Optional[str] = None,
+        account_config: Optional[dict] = None,
     ) -> int:
         uploader = uploader or YouTubeUploader(state_db=self.state_db)
         info = info or {"title": video_title}
@@ -819,6 +821,20 @@ class ShortsBotScheduler:
                         account=account,
                     )
 
+                # Cross-post to Instagram/TikTok. Independent of the YouTube
+                # result above: a quota wait or failed YouTube upload never
+                # blocks the social post. Runs BEFORE the temp-file cleanup
+                # below and before any R2-backup deletion, so the platforms
+                # can always fetch the finished video.
+                self._crosspost_to_social(
+                    account_config=account_config,
+                    account=account,
+                    video_id=part_id,
+                    video_path=processed_path,
+                    r2_key=uploaded_key,
+                    metadata=uploader.last_metadata,
+                )
+
                 if is_real_upload_id(short_id):
                     uploaded_count += 1
                     if delete_after_upload and saved_copy:
@@ -875,6 +891,33 @@ class ShortsBotScheduler:
 
     def _download_window(self, video_url: str, start: float, end: float) -> Path:
         return YouTubeFetcher().download_clip_section(video_url, start, end)
+
+    def _crosspost_to_social(
+        self,
+        account_config: Optional[dict],
+        account: str,
+        video_id: str,
+        video_path: Optional[Path],
+        r2_key: Optional[str],
+        metadata: Optional[dict],
+    ) -> dict:
+        """Post the finished Short to enabled Instagram/TikTok accounts.
+
+        Never raises: a social failure is recorded in social_posts and the
+        YouTube flow continues untouched.
+        """
+        if not account_config:
+            return {}
+        try:
+            from .social import SocialDestinations
+
+            poster = SocialDestinations(state_db=self.state_db, storage=self.storage)
+            return poster.crosspost(
+                account_config, video_id, video_path, r2_key, metadata or {}
+            )
+        except Exception as exc:
+            logger.warning("[%s] Social cross-post skipped: %s", account, exc)
+            return {}
 
     def _keep_local_copy(self, processed_short_path, video_id: str, account: str = "") -> None:
         """Compatibility helper retained for external callers/tests."""

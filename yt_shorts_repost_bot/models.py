@@ -212,6 +212,24 @@ class StateDB:
                 ON upload_reservations(account, expires_at)
                 """
             )
+            # One row per (Short, account, destination) cross-post attempt.
+            # POSTED rows make retries idempotent: a Short already live on
+            # Instagram/TikTok is never published twice.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS social_posts (
+                    video_id TEXT NOT NULL,
+                    account TEXT NOT NULL DEFAULT '',
+                    destination TEXT NOT NULL,
+                    remote_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    error_msg TEXT NOT NULL DEFAULT '',
+                    created_at TEXT,
+                    updated_at TEXT,
+                    PRIMARY KEY (video_id, account, destination)
+                )
+                """
+            )
             # Older builds incorrectly treated an age gate as permanent and
             # stored SKIPPED. Fresh cookies can unlock those sources, so migrate
             # them back to a descriptive retryable state automatically.
@@ -395,6 +413,76 @@ class StateDB:
             )
             conn.commit()
         logger.debug("Recorded state for %s/%s: status=%s", account, video_id, status)
+
+    # ------------------------------------------------------------------
+    # Instagram / TikTok cross-post tracking
+    def get_social_post(
+        self, video_id: str, account: str = "", destination: str = ""
+    ) -> Optional[dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM social_posts
+                WHERE video_id = ? AND account = ? AND destination = ?
+                """,
+                (video_id, account, destination),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def record_social_post(
+        self,
+        video_id: str,
+        account: str = "",
+        destination: str = "",
+        remote_id: str = "",
+        status: str = "",
+        error_msg: str = "",
+    ) -> None:
+        now = self._iso_now()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO social_posts (
+                    video_id, account, destination, remote_id,
+                    status, error_msg, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(video_id, account, destination) DO UPDATE SET
+                    remote_id=coalesce(
+                        nullif(excluded.remote_id, ''), social_posts.remote_id
+                    ),
+                    status=excluded.status,
+                    error_msg=excluded.error_msg,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    video_id,
+                    account,
+                    destination,
+                    remote_id,
+                    status,
+                    error_msg,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        logger.debug(
+            "Recorded social post for %s/%s/%s: status=%s",
+            account,
+            video_id,
+            destination,
+            status,
+        )
+
+    def get_social_posts_for_video(
+        self, video_id: str, account: str = ""
+    ) -> list[dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM social_posts WHERE video_id = ? AND account = ?",
+                (video_id, account),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     # ------------------------------------------------------------------
     # Upload quota and atomic reservations
@@ -623,6 +711,7 @@ class StateDB:
                 "daily_uploads",
                 "processing_claims",
                 "upload_reservations",
+                "social_posts",
             ):
                 conn.execute(f"DELETE FROM {table} WHERE account = ?", (account,))
             conn.commit()

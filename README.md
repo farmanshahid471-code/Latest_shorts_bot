@@ -290,6 +290,19 @@ included in the storage-limit calculation. Automatic pruning only deletes bot
 objects under `shorts/` or `reposts/`; unrelated bucket objects are never deleted.
 If usage cannot be measured safely, backup upload is refused.
 
+## Cross-posting to Instagram & TikTok
+
+Both bots can also post every finished Short to Instagram Reels (official Meta
+Graph API) and TikTok (official Content Posting API). Each account tab opts in
+separately in the control panel's **📣 Cross-post to Instagram & TikTok**
+section, with per-account credentials and **Test Instagram / Test TikTok**
+buttons. Cross-posting runs after each render and is independent of the
+YouTube result: a YouTube quota wait or failed upload never blocks the social
+post. Attempts are tracked in a `social_posts` table so retries never publish
+twice. Instagram additionally needs the R2 backup plus `R2_PUBLIC_BASE_URL`
+(Meta fetches the video from that public URL); TikTok uploads the file
+directly. Full setup: [SETUP_INSTAGRAM_TIKTOK.md](SETUP_INSTAGRAM_TIKTOK.md).
+
 ## CLI
 
 Clip bot:

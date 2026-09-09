@@ -152,6 +152,7 @@ def process_single_url(
                 ),
                 expected_channel=expected,
                 expected_channel_id=str(selected.get("connected_channel_id") or ""),
+                account_config=selected,
             )
         finally:
             db.release_video_claim(video_id, name, claim)

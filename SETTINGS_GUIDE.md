@@ -238,9 +238,14 @@ R2_SECRET_ACCESS_KEY=""
 R2_BUCKET_NAME="youtube-shorts-clips"
 R2_ENDPOINT_URL=""
 R2_MAX_BUCKET_BYTES=8589934592
+R2_PUBLIC_BASE_URL=""
 ```
 
 Blank credentials skip R2. Pruning only touches `shorts/` and `reposts/` keys.
+`R2_PUBLIC_BASE_URL` (e.g. `https://clips.example.com`) is only needed for
+Instagram Reels cross-posting — Meta's servers fetch the video from that
+public bucket URL. See `SETUP_INSTAGRAM_TIKTOK.md` for the per-account
+Instagram/TikTok toggles and credentials.
 
 ### Authenticated source cookies (bot checks and eligible 18+ videos)
 

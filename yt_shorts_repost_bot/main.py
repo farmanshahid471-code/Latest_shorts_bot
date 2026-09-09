@@ -128,6 +128,7 @@ def repost_one_url(url: str, account: Optional[dict] = None) -> bool:
                 expected_channel_id=str(selected.get("connected_channel_id") or ""),
                 aspect=selected.get("aspect") or "auto",
                 fill=selected.get("fill") or "crop",
+                account_config=selected,
             )
         finally:
             db.release_video_claim(video_id, name, claim)

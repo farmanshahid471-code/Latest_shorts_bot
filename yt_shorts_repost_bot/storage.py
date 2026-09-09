@@ -12,6 +12,7 @@ from .config import (
     R2_BUCKET_NAME,
     R2_ENDPOINT_URL,
     R2_MAX_BUCKET_BYTES,
+    R2_PUBLIC_BASE_URL,
     logger,
 )
 
@@ -201,6 +202,20 @@ class CloudStorageManager:
         except Exception as e:
             logger.error(f"Failed to upload {file_path.name} to R2: {e}")
             return None
+
+    def public_url_for_key(self, r2_key: Optional[str]) -> str:
+        """Public HTTPS URL for an R2 object, or "" when unavailable.
+
+        Instagram's API fetches the video from Meta's servers, so Reels
+        cross-posting needs the bucket exposed at R2_PUBLIC_BASE_URL. TikTok
+        uploads the file bytes directly and never needs this URL.
+        """
+        if not r2_key or not str(r2_key).strip():
+            return ""
+        base = str(R2_PUBLIC_BASE_URL or "").strip().rstrip("/")
+        if not base:
+            return ""
+        return f"{base}/{str(r2_key).strip().lstrip('/')}"
 
     @staticmethod
     def cleanup_local_files(*file_paths: Optional[Path]) -> None:
