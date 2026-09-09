@@ -14,6 +14,7 @@ import yt_shorts_bot.webui as clip_webui
 import yt_shorts_repost_bot.social as repost_social
 import yt_shorts_repost_bot.webui as repost_webui
 from yt_shorts_bot.models import StateDB as ClipStateDB
+from yt_shorts_bot.uploader import UPLOAD_QUOTA_REACHED
 from yt_shorts_repost_bot.models import StateDB as RepostStateDB
 
 SOCIAL_MODULES = {"clip": clip_social, "repost": repost_social}
@@ -72,6 +73,26 @@ def test_build_social_caption_truncates_and_handles_empty(name):
     assert len(social.build_social_caption({"title": long_title}, "tiktok")) == 150
     assert "New Short" in social.build_social_caption({}, "instagram")
     assert social.build_social_caption(None, "tiktok")
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_build_social_caption_strips_tag_whitespace(name):
+    social = SOCIAL_MODULES[name]
+    caption = social.build_social_caption(
+        {"title": "Hi", "tags": ["funny cats", "ok"]}, "instagram"
+    )
+    assert "#funnycats" in caption and "funny cats" not in caption
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_crosspost_short_wrapper_never_raises(name, tmp_path):
+    social = SOCIAL_MODULES[name]
+    db = STATE_DBS[name](tmp_path / f"{name}-wrap.db")
+    assert (
+        social.crosspost_short({"name": "A"}, "vid1", None, state_db=db, dry_run=True)
+        == {}
+    )
+    assert social.crosspost_short(None, "vid1", None, state_db=db) == {}
 
 
 @pytest.mark.parametrize("name", ["clip", "repost"])
@@ -159,6 +180,59 @@ def test_instagram_publish_reel_container_error(monkeypatch):
         uploader.publish_reel("https://cdn.example/a.mp4", "hi")
 
 
+def test_instagram_expired_token_refreshes_and_retries_with_fresh_token(monkeypatch):
+    calls = []
+    refreshed = {}
+
+    def _request(method, url, **kwargs):
+        params = kwargs.get("params") or {}
+        calls.append((method, url, params.get("access_token")))
+        if "oauth/access_token" in url:
+            assert params["fb_exchange_token"] == "old-token-value"
+            return FakeResponse(
+                {"access_token": "fresh-token-xyz", "expires_in": 5184000}
+            )
+        if url.endswith("/media") and method == "POST":
+            if params.get("access_token") == "old-token-value":
+                return FakeResponse(
+                    {"error": {"message": "Invalid OAuth access token.", "code": 190}},
+                    status_code=400,
+                )
+            # The retry MUST carry the refreshed token, not the stale one.
+            assert params.get("access_token") == "fresh-token-xyz"
+            return FakeResponse({"id": "container123"})
+        if "container123" in url:
+            return FakeResponse({"status_code": "FINISHED"})
+        if url.endswith("/media_publish"):
+            return FakeResponse({"id": "media1"})
+        raise AssertionError(f"unexpected call {method} {url}")
+
+    monkeypatch.setattr(clip_instagram.requests, "request", _request)
+    uploader = clip_instagram.InstagramReelsUploader(
+        ig_user_id="17841401234567890",
+        access_token="old-token-value",
+        app_id="app1",
+        app_secret="sec1",
+        dry_run=False,
+        on_token_refreshed=lambda token: refreshed.update({"token": token}),
+    )
+    assert uploader.publish_reel("https://cdn.example/a.mp4", "hi") == "media1"
+    assert refreshed == {"token": "fresh-token-xyz"}
+    container_posts = [c for c in calls if c[0] == "POST" and c[1].endswith("/media")]
+    assert [c[2] for c in container_posts] == ["old-token-value", "fresh-token-xyz"]
+
+
+def test_instagram_publish_reel_expired_container(monkeypatch):
+    monkeypatch.setattr(
+        clip_instagram.requests, "request", _instagram_responder([], "EXPIRED")
+    )
+    uploader = clip_instagram.InstagramReelsUploader(
+        ig_user_id="17841401234567890", access_token="tok", dry_run=False
+    )
+    with pytest.raises(clip_instagram.InstagramAPIError):
+        uploader.publish_reel("https://cdn.example/a.mp4", "hi")
+
+
 def test_instagram_dry_run_sends_nothing(monkeypatch):
     def _boom(*_args, **_kwargs):
         raise AssertionError("no HTTP in dry-run")
@@ -187,17 +261,26 @@ def _tiktok_post_factory(calls, status="PUBLISH_COMPLETE"):
             )
         if url.endswith("/v2/post/publish/status/fetch/"):
             return _ok_tiktok({"status": status})
-        if url.endswith("/v2/user/info/"):
-            return _ok_tiktok({"user": {"open_id": "open1", "display_name": "clipz"}})
         raise AssertionError(f"unexpected POST {url}")
 
     _post.state = state
     return _post
 
 
+def _tiktok_user_info_get(url, **kwargs):
+    # /v2/user/info/ is a GET endpoint with fields as query params.
+    assert url.endswith("/v2/user/info/")
+    assert kwargs["headers"]["Authorization"] == "Bearer tok"
+    assert kwargs["params"] == {"fields": "open_id,display_name"}
+    return _ok_tiktok({"user": {"open_id": "open1", "display_name": "clipz"}})
+
+
 def test_tiktok_check_connection_ok(monkeypatch):
-    calls = []
-    monkeypatch.setattr(clip_tiktok.requests, "post", _tiktok_post_factory(calls))
+    def _no_post(*_args, **_kwargs):
+        raise AssertionError("user info must use GET, not POST")
+
+    monkeypatch.setattr(clip_tiktok.requests, "get", _tiktok_user_info_get)
+    monkeypatch.setattr(clip_tiktok.requests, "post", _no_post)
     uploader = clip_tiktok.TikTokUploader(
         open_id="open1", access_token="tok", dry_run=False
     )
@@ -206,8 +289,7 @@ def test_tiktok_check_connection_ok(monkeypatch):
 
 
 def test_tiktok_check_connection_open_id_mismatch(monkeypatch):
-    calls = []
-    monkeypatch.setattr(clip_tiktok.requests, "post", _tiktok_post_factory(calls))
+    monkeypatch.setattr(clip_tiktok.requests, "get", _tiktok_user_info_get)
     uploader = clip_tiktok.TikTokUploader(
         open_id="someone-else", access_token="tok", dry_run=False
     )
@@ -288,9 +370,21 @@ def test_tiktok_expired_token_refreshes_and_retries(monkeypatch, tmp_path):
 
     def _post(url, **kwargs):
         if url.endswith("/v2/oauth/token/"):
-            refreshed.update(kwargs["json"])
-            return _ok_tiktok(
-                {"access_token": "newA", "refresh_token": "newR", "expires_in": 86400}
+            # The token endpoint requires form-encoded parameters and answers
+            # with a FLAT object (no nested data.* wrapper).
+            assert kwargs.get("json") is None
+            assert (
+                kwargs["headers"]["Content-Type"]
+                == "application/x-www-form-urlencoded"
+            )
+            refreshed.update(kwargs["data"])
+            return FakeResponse(
+                {
+                    "access_token": "newA",
+                    "refresh_token": "newR",
+                    "expires_in": 86400,
+                    "open_id": "open1",
+                }
             )
         if url.endswith("/v2/post/publish/creator_info/query/"):
             return _ok_tiktok({})
@@ -599,3 +693,276 @@ def test_sources_save_keeps_social_credentials(name, tmp_path, monkeypatch):
     assert saved["instagram_enabled"] is True
     assert saved["instagram_access_token"] == "igtok"
     assert saved["tiktok_access_token"] == "tttok"
+
+
+# ---------------------------------------------------------------------------
+# Scheduler integration: the hook fires independently of the YouTube result
+# ---------------------------------------------------------------------------
+class _HookStorage:
+    client = None
+
+    def upload_file(self, _path, r2_key=None):
+        return None
+
+    @staticmethod
+    def cleanup_local_files(*_paths):
+        return None
+
+
+class _HookProcessor:
+    def process_clip_to_short(self, raw_path, output_path=None, **_kwargs):
+        output = Path(output_path)
+        output.write_bytes(b"processed")
+        return output
+
+
+class _HookUploader:
+    def __init__(self, result):
+        self.result = result
+        self.last_metadata = {"title": "Hooked Title", "tags": ["hooked"]}
+        self.calls = 0
+
+    def upload_short(self, **kwargs):
+        self.calls += 1
+        return self.result
+
+
+class _HookShortsFetcher:
+    def __init__(self, raw_path):
+        self.raw_path = raw_path
+
+    def download_short(self, _url):
+        return self.raw_path
+
+    def get_short_info(self, _url):
+        return {"title": "Hooked Short"}
+
+
+class _HookReprocessor:
+    def process_short(self, _raw_path, output_path=None, **_kwargs):
+        output = Path(output_path)
+        output.write_bytes(b"processed")
+        return output
+
+
+@pytest.mark.parametrize(
+    "result,expected", [(None, 0), (UPLOAD_QUOTA_REACHED, 0), ("yt-real-1", 1)]
+)
+def test_clip_hook_fires_despite_youtube_result(tmp_path, monkeypatch, result, expected):
+    from yt_shorts_bot.scheduler import ShortsBotScheduler
+
+    db = ClipStateDB(tmp_path / "hook.db")
+    scheduler = ShortsBotScheduler(
+        accounts=[{"name": "H", "enabled": True}],
+        state_db=db,
+        processor=_HookProcessor(),
+        storage=_HookStorage(),
+    )
+    raw = tmp_path / "raw.mp4"
+    raw.write_bytes(b"raw")
+    monkeypatch.setattr(scheduler, "_download_window", lambda _u, _s, _e: raw)
+    seen = {}
+
+    def fake_crosspost(self, account, video_id, video_path, r2_key=None, metadata=None):
+        seen.update(
+            {
+                "account": account,
+                "video_id": video_id,
+                "video_path": Path(video_path),
+                "metadata": metadata,
+            }
+        )
+        return {"tiktok": "POSTED"}
+
+    monkeypatch.setattr(clip_social.SocialDestinations, "crosspost", fake_crosspost)
+    made = scheduler._process_video_windows(
+        "hookvid01",
+        "https://www.youtube.com/watch?v=hookvid01",
+        "Title",
+        "churl",
+        [{"start": 0.0, "end": 18.0}],
+        account="H",
+        uploader=_HookUploader(result),
+        info={"title": "Title"},
+        account_config={"name": "H", "tiktok_enabled": True},
+    )
+    assert made == expected
+    # The hook fired with the finished file + YouTube metadata either way.
+    assert seen["video_id"] == "hookvid01"
+    assert seen["account"]["tiktok_enabled"] is True
+    assert seen["video_path"].name.startswith("processed_")
+    assert seen["metadata"]["title"] == "Hooked Title"
+
+
+def test_clip_hook_social_crash_does_not_break_youtube(tmp_path, monkeypatch):
+    from yt_shorts_bot.scheduler import ShortsBotScheduler
+
+    db = ClipStateDB(tmp_path / "hook-crash.db")
+    scheduler = ShortsBotScheduler(
+        accounts=[{"name": "H", "enabled": True}],
+        state_db=db,
+        processor=_HookProcessor(),
+        storage=_HookStorage(),
+    )
+    raw = tmp_path / "raw.mp4"
+    raw.write_bytes(b"raw")
+    monkeypatch.setattr(scheduler, "_download_window", lambda _u, _s, _e: raw)
+
+    def boom(self, *_args, **_kwargs):
+        raise RuntimeError("social exploded")
+
+    monkeypatch.setattr(clip_social.SocialDestinations, "crosspost", boom)
+    made = scheduler._process_video_windows(
+        "hookvid02",
+        "https://www.youtube.com/watch?v=hookvid02",
+        "Title",
+        "churl",
+        [{"start": 0.0, "end": 18.0}],
+        account="H",
+        uploader=_HookUploader("yt-real-9"),
+        info={"title": "Title"},
+        account_config={"name": "H", "tiktok_enabled": True},
+    )
+    assert made == 1
+
+
+def test_repost_hook_fires_despite_youtube_result(tmp_path, monkeypatch):
+    from yt_shorts_repost_bot.scheduler import ShortsRepostScheduler
+
+    db = RepostStateDB(tmp_path / "hook.db")
+    scheduler = ShortsRepostScheduler(
+        accounts=[{"name": "H", "enabled": True}],
+        state_db=db,
+        storage=_HookStorage(),
+    )
+    raw = tmp_path / "raw.mp4"
+    raw.write_bytes(b"raw")
+    seen = {}
+
+    def fake_crosspost(self, account, video_id, video_path, r2_key=None, metadata=None):
+        seen.update({"video_id": video_id, "account": account})
+        return {"instagram": "POSTED"}
+
+    monkeypatch.setattr(repost_social.SocialDestinations, "crosspost", fake_crosspost)
+    ok = scheduler._process_one(
+        "rhook01",
+        "https://www.youtube.com/shorts/rhook01",
+        "Title",
+        "churl",
+        account="H",
+        fetcher=_HookShortsFetcher(raw),
+        reprocessor=_HookReprocessor(),
+        uploader=_HookUploader(None),
+        account_config={"name": "H", "instagram_enabled": True},
+    )
+    assert ok is False  # YouTube failed, but the hook still fired.
+    assert seen == {"video_id": "rhook01", "account": {"name": "H", "instagram_enabled": True}}
+
+
+def test_end_to_end_cycle_posts_youtube_and_social(tmp_path, monkeypatch):
+    """Full clip-bot cycle with social enabled: YouTube upload + IG Reel +
+    TikTok post, all tracked in the DB. All platform HTTP is mocked."""
+    import yt_shorts_bot.scheduler as clip_scheduler_module
+    from yt_shorts_bot.scheduler import ShortsBotScheduler
+
+    account = {
+        "name": "E2E",
+        "target_channels": ["https://www.youtube.com/@Source"],
+        "enabled": True,
+        "shorts_per_video": 1,
+        "min_minutes_between_uploads": 0,
+        "max_daily_uploads": 10,
+        "instagram_enabled": True,
+        "instagram_ig_user_id": "17841401234567890",
+        "instagram_access_token": "ig-token",
+        "tiktok_enabled": True,
+        "tiktok_open_id": "open1",
+        "tiktok_access_token": "tt-token",
+    }
+
+    class _E2EFetcher:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fetch_channel_recent_videos(self, _url, order="newest"):
+            return [
+                {
+                    "video_id": "e2evid00001",
+                    "url": "https://www.youtube.com/watch?v=e2evid00001",
+                    "title": "E2E VOD",
+                    "duration": 400,
+                }
+            ]
+
+        def extract_heatmap_and_select_window(self, _url):
+            return ({"title": "E2E VOD"}, 10.0, 1.0, 19.0)
+
+    class _E2EUploader:
+        dry_run = False
+
+        def __init__(self, *_args, **_kwargs):
+            self.last_metadata = {"title": "E2E Short #e2e", "tags": ["e2e", "clips"]}
+
+        def upload_short(self, **kwargs):
+            return "yt-e2e-1"
+
+    class _E2EStorage(_HookStorage):
+        def upload_file(self, _path, r2_key=None):
+            return r2_key
+
+        def public_url_for_key(self, r2_key):
+            return f"https://cdn.example/{r2_key}" if r2_key else ""
+
+    monkeypatch.setattr(clip_scheduler_module, "YouTubeFetcher", _E2EFetcher)
+    monkeypatch.setattr(clip_scheduler_module, "YouTubeUploader", _E2EUploader)
+
+    seen_ig = {}
+
+    def _ig_request(method, url, **kwargs):
+        if url.endswith("/media") and method == "POST":
+            seen_ig.update(kwargs.get("params") or {})
+            return FakeResponse({"id": "container-e2e"})
+        if "container-e2e" in url:
+            return FakeResponse({"status_code": "FINISHED"})
+        if url.endswith("/media_publish"):
+            return FakeResponse({"id": "ig-media-e2e"})
+        raise AssertionError(f"unexpected IG call {method} {url}")
+
+    def _tt_post(url, **kwargs):
+        if url.endswith("/v2/post/publish/creator_info/query/"):
+            return _ok_tiktok({"privacy_level_options": ["PUBLIC_TO_EVERYONE"]})
+        if url.endswith("/v2/post/publish/video/init/"):
+            posted = kwargs["json"]
+            assert posted["source_info"]["source"] == "PULL_FROM_URL"
+            assert posted["post_info"]["title"] == "E2E Short #e2e #clips"
+            return _ok_tiktok({"publish_id": "tt-pub-e2e"})
+        if url.endswith("/v2/post/publish/status/fetch/"):
+            return _ok_tiktok({"status": "PUBLISH_COMPLETE"})
+        raise AssertionError(f"unexpected TikTok POST {url}")
+
+    def _no_put(*_args, **_kwargs):
+        raise AssertionError("URL-pull flow must not PUT chunks")
+
+    monkeypatch.setattr(clip_instagram.requests, "request", _ig_request)
+    monkeypatch.setattr(clip_tiktok.requests, "post", _tt_post)
+    monkeypatch.setattr(clip_tiktok.requests, "put", _no_put)
+
+    db = ClipStateDB(tmp_path / "e2e.db")
+    scheduler = ShortsBotScheduler(
+        accounts=[account],
+        state_db=db,
+        processor=_HookProcessor(),
+        storage=_E2EStorage(),
+    )
+    raw = tmp_path / "raw.mp4"
+    raw.write_bytes(b"raw")
+    monkeypatch.setattr(scheduler, "_download_window", lambda _u, _s, _e: raw)
+
+    assert scheduler.run_single_cycle(accounts=scheduler.accounts) == 1
+    assert db.get_video_state("e2evid00001", "E2E")["status"] == "UPLOADED_YOUTUBE"
+    assert seen_ig["caption"] == "E2E Short #e2e\n\n#clips"
+    assert seen_ig["video_url"].startswith("https://cdn.example/shorts/")
+    ig = db.get_social_post("e2evid00001", "E2E", "instagram")
+    tt = db.get_social_post("e2evid00001", "E2E", "tiktok")
+    assert (ig["status"], ig["remote_id"]) == ("POSTED", "ig-media-e2e")
+    assert (tt["status"], tt["remote_id"]) == ("POSTED", "tt-pub-e2e")

@@ -855,6 +855,52 @@ class ShortsBotScheduler:
                         state,
                     )
             except Exception as exc:
+                if is_age_restricted_source(exc):
+                    # An age gate blocks the WHOLE source video: every part
+                    # would fail the same way. Mark this part retryable and
+                    # re-raise so the cycle skips this video and moves on to
+                    # the next candidate instead of ending with zero uploads.
+                    # Fresh 18+ viewer cookies can unlock it in a later cycle.
+                    self.state_db.record_video_state(
+                        video_id=part_id,
+                        video_url=video_url,
+                        title=video_title,
+                        peak_time=(start + end) / 2.0,
+                        clip_start=start,
+                        clip_end=end,
+                        status="SOURCE_AUTH_REQUIRED",
+                        error_msg=str(exc)[:500],
+                        account=account,
+                    )
+                    logger.warning(
+                        "[%s] Part %s needs age-verified cookies; skipping "
+                        "this video and moving to the next candidate.",
+                        account,
+                        index,
+                    )
+                    raise
+                if is_permanent_source_failure(exc):
+                    # Removed/private/region-blocked mid-cycle: terminal, and
+                    # the cycle should try the next candidate, not end here.
+                    self.state_db.record_video_state(
+                        video_id=part_id,
+                        video_url=video_url,
+                        title=video_title,
+                        peak_time=(start + end) / 2.0,
+                        clip_start=start,
+                        clip_end=end,
+                        status="SKIPPED",
+                        error_msg=str(exc)[:500],
+                        account=account,
+                    )
+                    logger.warning(
+                        "[%s] Part %s can never be clipped (%s); skipping "
+                        "this video and moving to the next candidate.",
+                        account,
+                        index,
+                        exc,
+                    )
+                    raise
                 self.state_db.record_video_state(
                     video_id=part_id,
                     video_url=video_url,

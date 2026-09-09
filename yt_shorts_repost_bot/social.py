@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from .config import ACCOUNTS_FILE, DRY_RUN, logger
 from .models import StateDB
@@ -59,7 +60,8 @@ def build_social_caption(metadata: Optional[dict], destination: str) -> str:
     title = str(metadata.get("title") or "").strip() or "New Short 🎬"
     tags: list[str] = []
     for raw in metadata.get("tags") or []:
-        tag = str(raw or "").strip().lstrip("#")
+        # Hashtags cannot contain whitespace ("funny cats" -> "#funnycats").
+        tag = re.sub(r"\s+", "", str(raw or "").strip().lstrip("#"))
         if tag and tag not in tags:
             tags.append(tag)
     lowered_title = title.lower()
@@ -351,10 +353,8 @@ def crosspost_short(
     metadata: Optional[dict] = None,
     state_db: Optional[StateDB] = None,
     dry_run: Optional[bool] = None,
-    token_saver: Optional[Callable[..., bool]] = None,
 ) -> dict[str, str]:
-    """Convenience wrapper used by the schedulers (never raises)."""
-    _ = token_saver  # Token persistence is handled via save_social_tokens.
+    """Convenience wrapper around SocialDestinations (never raises)."""
     try:
         poster = SocialDestinations(state_db=state_db, dry_run=dry_run)
         return poster.crosspost(account, video_id, video_path, r2_key, metadata)

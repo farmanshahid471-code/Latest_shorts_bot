@@ -109,13 +109,15 @@ approves the app (submit for audit in the developer portal when ready).
    `https://www.tiktok.com/v2/auth/authorize/?client_key=CLIENT_KEY&response_type=code&scope=user.info.basic,video.upload,video.publish&redirect_uri=REDIRECT_URI&state=xyz`
 2. Log in with the TikTok account that should receive the posts and approve.
 3. TikTok redirects to `REDIRECT_URI?code=...` — copy the `code`.
-4. Exchange it (one `curl`):
+4. Exchange it (one `curl` — TikTok requires form-encoded parameters):
    ```bash
-   curl -X POST "https://open.tiktokapis.com/v2/oauth/token/" \
-     -H "Content-Type: application/json" \
-     -d '{"client_key":"CLIENT_KEY","client_secret":"CLIENT_SECRET",
-          "code":"CODE","grant_type":"authorization_code",
-          "redirect_uri":"REDIRECT_URI"}'
+   curl --request POST "https://open.tiktokapis.com/v2/oauth/token/" \
+     --header "Content-Type: application/x-www-form-urlencoded" \
+     --data-urlencode "client_key=CLIENT_KEY" \
+     --data-urlencode "client_secret=CLIENT_SECRET" \
+     --data-urlencode "code=CODE" \
+     --data-urlencode "grant_type=authorization_code" \
+     --data-urlencode "redirect_uri=REDIRECT_URI"
    ```
    The response contains `access_token`, `refresh_token` (valid ~1 year),
    `open_id`, and `expires_in`.

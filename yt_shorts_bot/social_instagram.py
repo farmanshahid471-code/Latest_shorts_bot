@@ -123,6 +123,11 @@ class InstagramReelsUploader:
             if not refreshed:
                 raise
             logger.info("Instagram token refreshed; retrying the request.")
+            # The params were built with the expired token: swap in the fresh
+            # one or the retry would fail with the same auth error.
+            params = kwargs.get("params")
+            if isinstance(params, dict):
+                kwargs["params"] = {**params, "access_token": self.access_token}
             return self._request(method, path, **kwargs)
 
     @staticmethod
@@ -246,7 +251,7 @@ class InstagramReelsUploader:
             status = str(payload.get("status_code") or "").strip().upper()
             if status == "FINISHED":
                 return
-            if status == "ERROR":
+            if status in ("ERROR", "EXPIRED"):
                 detail = str(payload.get("status") or "processing failed")
                 raise InstagramAPIError(f"Meta could not process the video: {detail}")
             if time.monotonic() >= deadline:

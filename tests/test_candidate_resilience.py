@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import yt_shorts_bot.fetcher as clip_fetcher_module
 import yt_shorts_bot.scheduler as clip_scheduler_module
 from yt_shorts_bot.fetcher import (
@@ -252,6 +254,147 @@ def test_cycle_gives_up_after_configured_attempts(monkeypatch, tmp_path, caplog)
     assert db.get_video_state("failvid002", "FailAcc") is None  # never touched
     # Retryable means it CAN be picked again next cycle:
     assert db.claim_video("failvid000", "FailAcc") is not None
+
+
+# ---------------------------------------------------------------------------
+# Source failures at DOWNLOAD stage: skip the video, post the next candidate
+# ---------------------------------------------------------------------------
+class _TwoVideoFetcher:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def fetch_channel_recent_videos(self, _channel_url, order="newest"):
+        return [
+            {
+                "video_id": "stagebad0001",
+                "url": "https://www.youtube.com/watch?v=stagebad0001",
+                "title": "Bad at download",
+                "duration": 400,
+            },
+            {
+                "video_id": "stagegood001",
+                "url": "https://www.youtube.com/watch?v=stagegood001",
+                "title": "Good VOD",
+                "duration": 400,
+            },
+        ]
+
+    def extract_heatmap_and_select_window(self, _url):
+        return ({"title": "t"}, 10.0, 1.0, 19.0)
+
+
+class _CycleUploader:
+    dry_run = False
+
+    def __init__(self, *args, **kwargs):
+        self.last_metadata = None
+
+    def upload_short(self, **kwargs):
+        return "yt-cycle-1"
+
+
+def _download_stage_scheduler(monkeypatch, tmp_path, account_name, download_error):
+    monkeypatch.setattr(clip_scheduler_module, "YouTubeFetcher", _TwoVideoFetcher)
+    monkeypatch.setattr(clip_scheduler_module, "YouTubeUploader", _CycleUploader)
+    db = StateDB(db_path=tmp_path / "state.db")
+    scheduler = ShortsBotScheduler(
+        accounts=[_account(account_name)],
+        state_db=db,
+        processor=_FakeProcessor(),
+        storage=_FakeStorage(),
+    )
+
+    def fake_download(url, _start, _end):
+        if "stagebad" in url:
+            raise download_error
+        raw = tmp_path / "raw_good.mp4"
+        raw.write_bytes(b"raw")
+        return raw
+
+    scheduler._download_window = fake_download
+    return scheduler, db
+
+
+def test_cycle_skips_age_gated_video_at_download_stage(monkeypatch, tmp_path):
+    """An age gate at download time must skip the video and post the next
+    candidate — not end the cycle with zero uploads."""
+    scheduler, db = _download_stage_scheduler(
+        monkeypatch, tmp_path, "GateAcc", RuntimeError(AGE_GATE)
+    )
+    uploaded = scheduler.run_single_cycle(accounts=scheduler.accounts)
+
+    assert uploaded == 1
+    assert (
+        db.get_video_state("stagebad0001", "GateAcc")["status"]
+        == "SOURCE_AUTH_REQUIRED"
+    )
+    assert (
+        db.get_video_state("stagegood001", "GateAcc")["status"] == "UPLOADED_YOUTUBE"
+    )
+    # Retryable: a later cycle may pick the gated video again after cookies.
+    assert db.claim_video("stagebad0001", "GateAcc") is not None
+
+
+def test_cycle_skips_permanently_dead_video_at_download_stage(monkeypatch, tmp_path):
+    scheduler, db = _download_stage_scheduler(
+        monkeypatch, tmp_path, "DeadAcc", RuntimeError("Private video")
+    )
+    uploaded = scheduler.run_single_cycle(accounts=scheduler.accounts)
+
+    assert uploaded == 1
+    assert db.get_video_state("stagebad0001", "DeadAcc")["status"] == "SKIPPED"
+    assert (
+        db.get_video_state("stagegood001", "DeadAcc")["status"] == "UPLOADED_YOUTUBE"
+    )
+
+
+def test_process_windows_reraises_age_gate_for_outer_candidate_loop(tmp_path):
+    scheduler, db = _scheduler_for_parts(tmp_path, "ReRaiseAcc")
+
+    def boom(_url, _start, _end):
+        raise RuntimeError(AGE_GATE)
+
+    scheduler._download_window = boom
+    with pytest.raises(RuntimeError):
+        scheduler._process_video_windows(
+            "agevid0001",
+            "https://www.youtube.com/watch?v=agevid0001",
+            "Title",
+            "churl",
+            _windows(1),
+            account="ReRaiseAcc",
+            max_daily=10,
+            uploader=_FakeUploader(),
+            info={"title": "Title"},
+            min_gap_minutes=0,
+        )
+    assert (
+        db.get_video_state("agevid0001", "ReRaiseAcc")["status"]
+        == "SOURCE_AUTH_REQUIRED"
+    )
+
+
+def test_process_windows_reraises_permanent_failure(tmp_path):
+    scheduler, db = _scheduler_for_parts(tmp_path, "ReRaiseDead")
+
+    def boom(_url, _start, _end):
+        raise RuntimeError("Private video")
+
+    scheduler._download_window = boom
+    with pytest.raises(RuntimeError):
+        scheduler._process_video_windows(
+            "deadprocess1",
+            "https://www.youtube.com/watch?v=deadprocess1",
+            "Title",
+            "churl",
+            _windows(1),
+            account="ReRaiseDead",
+            max_daily=10,
+            uploader=_FakeUploader(),
+            info={"title": "Title"},
+            min_gap_minutes=0,
+        )
+    assert db.get_video_state("deadprocess1", "ReRaiseDead")["status"] == "SKIPPED"
 
 
 # ---------------------------------------------------------------------------
