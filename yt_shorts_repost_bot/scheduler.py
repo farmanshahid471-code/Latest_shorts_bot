@@ -611,7 +611,7 @@ class ShortsRepostScheduler:
                     account=account,
                 )
 
-            # Cross-post to Instagram/TikTok. Independent of the YouTube
+            # Cross-post to TikTok. Independent of the YouTube
             # result above: a quota wait or failed YouTube upload never
             # blocks the social post. Runs BEFORE the temp-file cleanup
             # below and before any R2-backup deletion, so the platforms
@@ -657,7 +657,7 @@ class ShortsRepostScheduler:
         r2_key: Optional[str],
         metadata: Optional[dict],
     ) -> dict:
-        """Post the finished Short to enabled Instagram/TikTok accounts.
+        """Post the finished Short to enabled TikTok accounts.
 
         Never raises: a social failure is recorded in social_posts and the
         YouTube flow continues untouched.

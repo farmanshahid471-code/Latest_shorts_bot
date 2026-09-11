@@ -214,7 +214,7 @@ class StateDB:
             )
             # One row per (Short, account, destination) cross-post attempt.
             # POSTED rows make retries idempotent: a Short already live on
-            # Instagram/TikTok is never published twice.
+            # TikTok is never published twice.
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS social_posts (
@@ -415,7 +415,7 @@ class StateDB:
         logger.debug("Recorded state for %s/%s: status=%s", account, video_id, status)
 
     # ------------------------------------------------------------------
-    # Instagram / TikTok cross-post tracking
+    # TikTok cross-post tracking
     def get_social_post(
         self, video_id: str, account: str = "", destination: str = ""
     ) -> Optional[dict[str, Any]]:

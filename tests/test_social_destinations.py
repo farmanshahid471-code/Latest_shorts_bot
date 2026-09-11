@@ -1,4 +1,4 @@
-"""Instagram + TikTok cross-posting: captions, uploaders, idempotency, panel."""
+"""TikTok cross-posting: captions, uploader, idempotency, panel."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 import yt_shorts_bot.social as clip_social
-import yt_shorts_bot.social_instagram as clip_instagram
 import yt_shorts_bot.social_tiktok as clip_tiktok
 import yt_shorts_bot.webui as clip_webui
 import yt_shorts_repost_bot.social as repost_social
@@ -60,9 +59,6 @@ def test_build_social_caption(name):
     social = SOCIAL_MODULES[name]
     # Tags already present in the title ("cats", "funny") are not duplicated.
     metadata = {"title": "Funny Cat #cats", "tags": ["cats", "funny", "pets"]}
-    assert (
-        social.build_social_caption(metadata, "instagram") == "Funny Cat #cats\n\n#pets"
-    )
     assert social.build_social_caption(metadata, "tiktok") == "Funny Cat #cats #pets"
 
 
@@ -71,7 +67,7 @@ def test_build_social_caption_truncates_and_handles_empty(name):
     social = SOCIAL_MODULES[name]
     long_title = "x" * 500
     assert len(social.build_social_caption({"title": long_title}, "tiktok")) == 150
-    assert "New Short" in social.build_social_caption({}, "instagram")
+    assert "New Short" in social.build_social_caption({}, "tiktok")
     assert social.build_social_caption(None, "tiktok")
 
 
@@ -79,7 +75,7 @@ def test_build_social_caption_truncates_and_handles_empty(name):
 def test_build_social_caption_strips_tag_whitespace(name):
     social = SOCIAL_MODULES[name]
     caption = social.build_social_caption(
-        {"title": "Hi", "tags": ["funny cats", "ok"]}, "instagram"
+        {"title": "Hi", "tags": ["funny cats", "ok"]}, "tiktok"
     )
     assert "#funnycats" in caption and "funny cats" not in caption
 
@@ -98,150 +94,18 @@ def test_crosspost_short_wrapper_never_raises(name, tmp_path):
 @pytest.mark.parametrize("name", ["clip", "repost"])
 def test_is_enabled(name):
     social = SOCIAL_MODULES[name]
-    assert not social.is_enabled(None, "instagram")
+    assert not social.is_enabled(None, "tiktok")
     assert not social.is_enabled({}, "tiktok")
-    assert social.is_enabled({"instagram_enabled": True}, "instagram")
-    assert not social.is_enabled({"instagram_enabled": True}, "tiktok")
+    assert not social.is_enabled({"tiktok_enabled": False}, "tiktok")
     assert social.is_enabled({"tiktok_enabled": 1}, "tiktok")
 
 
 def test_social_modules_are_mirrored():
     root = Path(__file__).resolve().parents[1]
-    for filename in ("social.py", "social_instagram.py", "social_tiktok.py"):
+    for filename in ("social.py", "social_tiktok.py"):
         clip = (root / "yt_shorts_bot" / filename).read_text(encoding="utf-8")
         repost = (root / "yt_shorts_repost_bot" / filename).read_text(encoding="utf-8")
         assert clip == repost, f"{filename} diverged between bots"
-
-
-# ---------------------------------------------------------------------------
-# Instagram uploader (mocked HTTP)
-# ---------------------------------------------------------------------------
-def _instagram_responder(calls, container_status="FINISHED"):
-    def _request(method, url, **kwargs):
-        calls.append((method, url))
-        if url.endswith("/media") and method == "POST":
-            return FakeResponse({"id": "container123"})
-        if url.endswith("/media_publish"):
-            return FakeResponse({"id": "media999"})
-        if "container123" in url:
-            return FakeResponse({"status_code": container_status})
-        if url.rstrip("/").endswith("17841401234567890"):
-            return FakeResponse({"id": "17841401234567890", "username": "clipz"})
-        raise AssertionError(f"unexpected call {method} {url}")
-
-    return _request
-
-
-def test_instagram_check_connection_ok(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        clip_instagram.requests, "request", _instagram_responder(calls)
-    )
-    uploader = clip_instagram.InstagramReelsUploader(
-        ig_user_id="17841401234567890",
-        access_token="secret-token-abc123",
-        dry_run=False,
-    )
-    ok, detail = uploader.check_connection()
-    assert ok and "@clipz" in detail
-    assert "secret-token-abc123" not in detail  # tokens never leak into messages
-    assert detail.endswith("(token …c123).")
-
-
-def test_instagram_check_connection_missing_config():
-    uploader = clip_instagram.InstagramReelsUploader(dry_run=False)
-    ok, detail = uploader.check_connection()
-    assert not ok and detail
-
-
-def test_instagram_publish_reel_flow(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        clip_instagram.requests, "request", _instagram_responder(calls)
-    )
-    uploader = clip_instagram.InstagramReelsUploader(
-        ig_user_id="17841401234567890", access_token="tok", dry_run=False
-    )
-    assert (
-        uploader.publish_reel("https://cdn.example/a.mp4", "hi #x") == "media999"
-    )
-    assert [method for method, _ in calls] == ["POST", "GET", "POST"]
-
-
-def test_instagram_publish_reel_container_error(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        clip_instagram.requests, "request", _instagram_responder(calls, "ERROR")
-    )
-    uploader = clip_instagram.InstagramReelsUploader(
-        ig_user_id="17841401234567890", access_token="tok", dry_run=False
-    )
-    with pytest.raises(clip_instagram.InstagramAPIError):
-        uploader.publish_reel("https://cdn.example/a.mp4", "hi")
-
-
-def test_instagram_expired_token_refreshes_and_retries_with_fresh_token(monkeypatch):
-    calls = []
-    refreshed = {}
-
-    def _request(method, url, **kwargs):
-        params = kwargs.get("params") or {}
-        calls.append((method, url, params.get("access_token")))
-        if "oauth/access_token" in url:
-            assert params["fb_exchange_token"] == "old-token-value"
-            return FakeResponse(
-                {"access_token": "fresh-token-xyz", "expires_in": 5184000}
-            )
-        if url.endswith("/media") and method == "POST":
-            if params.get("access_token") == "old-token-value":
-                return FakeResponse(
-                    {"error": {"message": "Invalid OAuth access token.", "code": 190}},
-                    status_code=400,
-                )
-            # The retry MUST carry the refreshed token, not the stale one.
-            assert params.get("access_token") == "fresh-token-xyz"
-            return FakeResponse({"id": "container123"})
-        if "container123" in url:
-            return FakeResponse({"status_code": "FINISHED"})
-        if url.endswith("/media_publish"):
-            return FakeResponse({"id": "media1"})
-        raise AssertionError(f"unexpected call {method} {url}")
-
-    monkeypatch.setattr(clip_instagram.requests, "request", _request)
-    uploader = clip_instagram.InstagramReelsUploader(
-        ig_user_id="17841401234567890",
-        access_token="old-token-value",
-        app_id="app1",
-        app_secret="sec1",
-        dry_run=False,
-        on_token_refreshed=lambda token: refreshed.update({"token": token}),
-    )
-    assert uploader.publish_reel("https://cdn.example/a.mp4", "hi") == "media1"
-    assert refreshed == {"token": "fresh-token-xyz"}
-    container_posts = [c for c in calls if c[0] == "POST" and c[1].endswith("/media")]
-    assert [c[2] for c in container_posts] == ["old-token-value", "fresh-token-xyz"]
-
-
-def test_instagram_publish_reel_expired_container(monkeypatch):
-    monkeypatch.setattr(
-        clip_instagram.requests, "request", _instagram_responder([], "EXPIRED")
-    )
-    uploader = clip_instagram.InstagramReelsUploader(
-        ig_user_id="17841401234567890", access_token="tok", dry_run=False
-    )
-    with pytest.raises(clip_instagram.InstagramAPIError):
-        uploader.publish_reel("https://cdn.example/a.mp4", "hi")
-
-
-def test_instagram_dry_run_sends_nothing(monkeypatch):
-    def _boom(*_args, **_kwargs):
-        raise AssertionError("no HTTP in dry-run")
-
-    monkeypatch.setattr(clip_instagram.requests, "request", _boom)
-    uploader = clip_instagram.InstagramReelsUploader(
-        ig_user_id="1", access_token="tok", dry_run=True
-    )
-    assert uploader.publish_reel("https://cdn.example/a.mp4") == "DRY_RUN"
 
 
 # ---------------------------------------------------------------------------
@@ -445,16 +309,16 @@ def test_crosspost_disabled_posts_nothing(name, tmp_path, monkeypatch):
 def test_crosspost_skips_already_posted(name, tmp_path, monkeypatch):
     social = SOCIAL_MODULES[name]
     poster, db = _poster(name, tmp_path, monkeypatch)
-    db.record_social_post("vid1", "A", "instagram", remote_id="m1", status="POSTED")
+    db.record_social_post("vid1", "A", "tiktok", remote_id="m1", status="POSTED")
 
     def _boom(*_args, **_kwargs):
         raise AssertionError("already-posted must not touch the network")
 
-    monkeypatch.setattr(social.InstagramReelsUploader, "publish_reel", _boom)
-    account = {"name": "A", "instagram_enabled": True,
-               "instagram_ig_user_id": "1", "instagram_access_token": "t"}
+    monkeypatch.setattr(social.TikTokUploader, "upload_video", _boom)
+    account = {"name": "A", "tiktok_enabled": True,
+               "tiktok_open_id": "1", "tiktok_access_token": "t"}
     assert poster.crosspost(account, "vid1", None, "k.mp4", {}) == {
-        "instagram": social.SOCIAL_ALREADY_POSTED
+        "tiktok": social.SOCIAL_ALREADY_POSTED
     }
 
 
@@ -462,55 +326,13 @@ def test_crosspost_skips_already_posted(name, tmp_path, monkeypatch):
 def test_crosspost_dry_run_records_without_network(name, tmp_path, monkeypatch):
     social = SOCIAL_MODULES[name]
     poster, db = _poster(name, tmp_path, monkeypatch, dry_run=True)
-    account = {"name": "A", "instagram_enabled": True,
-               "instagram_ig_user_id": "1", "instagram_access_token": "t"}
+    account = {"name": "A", "tiktok_enabled": True,
+               "tiktok_open_id": "1", "tiktok_access_token": "t"}
     assert poster.crosspost(account, "vid1", None, "k.mp4", {}) == {
-        "instagram": social.SOCIAL_DRY_RUN
+        "tiktok": social.SOCIAL_DRY_RUN
     }
-    row = db.get_social_post("vid1", "A", "instagram")
+    row = db.get_social_post("vid1", "A", "tiktok")
     assert row["status"] == social.SOCIAL_DRY_RUN
-
-
-@pytest.mark.parametrize("name", ["clip", "repost"])
-def test_crosspost_instagram_needs_public_url(name, tmp_path, monkeypatch):
-    social = SOCIAL_MODULES[name]
-    poster, db = _poster(name, tmp_path, monkeypatch, public_url="")
-    account = {"name": "A", "instagram_enabled": True,
-               "instagram_ig_user_id": "1", "instagram_access_token": "t"}
-    assert poster.crosspost(account, "vid1", None, "k.mp4", {}) == {
-        "instagram": social.SOCIAL_SKIPPED
-    }
-    row = db.get_social_post("vid1", "A", "instagram")
-    assert row["status"] == social.SOCIAL_SKIPPED
-    assert "R2_PUBLIC_BASE_URL" in row["error_msg"]
-
-
-@pytest.mark.parametrize("name", ["clip", "repost"])
-def test_crosspost_instagram_success_and_failure(name, tmp_path, monkeypatch):
-    social = SOCIAL_MODULES[name]
-    poster, db = _poster(name, tmp_path, monkeypatch,
-                         public_url="https://cdn.example")
-    account = {"name": "A", "instagram_enabled": True,
-               "instagram_ig_user_id": "1", "instagram_access_token": "t"}
-    metadata = {"title": "Hi", "tags": ["x"]}
-
-    monkeypatch.setattr(
-        social.InstagramReelsUploader, "publish_reel", lambda self, url, cap="": "media1"
-    )
-    assert poster.crosspost(account, "vid1", None, "k.mp4", metadata) == {
-        "instagram": social.SOCIAL_POSTED
-    }
-    assert db.get_social_post("vid1", "A", "instagram")["remote_id"] == "media1"
-
-    def _fail(self, url, cap=""):
-        raise social.InstagramAPIError("Meta says no")
-
-    monkeypatch.setattr(social.InstagramReelsUploader, "publish_reel", _fail)
-    assert poster.crosspost(account, "vid2", None, "k.mp4", metadata) == {
-        "instagram": social.SOCIAL_FAILED
-    }
-    row = db.get_social_post("vid2", "A", "instagram")
-    assert row["status"] == social.SOCIAL_FAILED and "Meta says no" in row["error_msg"]
 
 
 @pytest.mark.parametrize("name", ["clip", "repost"])
@@ -541,14 +363,14 @@ def test_crosspost_never_raises(name, tmp_path, monkeypatch):
     poster, _db = _poster(name, tmp_path, monkeypatch,
                           public_url="https://cdn.example")
 
-    def _crash(self, url, cap=""):
+    def _crash(self, *_args, **_kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(social.InstagramReelsUploader, "publish_reel", _crash)
-    account = {"name": "A", "instagram_enabled": True,
-               "instagram_ig_user_id": "1", "instagram_access_token": "t"}
+    monkeypatch.setattr(social.TikTokUploader, "upload_video", _crash)
+    account = {"name": "A", "tiktok_enabled": True,
+               "tiktok_open_id": "1", "tiktok_access_token": "t"}
     assert poster.crosspost(account, "vid1", None, "k.mp4", {}) == {
-        "instagram": social.SOCIAL_FAILED
+        "tiktok": social.SOCIAL_FAILED
     }
 
 
@@ -601,9 +423,6 @@ def test_social_save_endpoint(name, tmp_path, monkeypatch):
         "/api/social/save",
         data={
             "account": "A",
-            "instagram_enabled": "true",
-            "instagram_ig_user_id": "1784",
-            "instagram_access_token": "igtok",
             "tiktok_enabled": "true",
             "tiktok_open_id": "open1",
             "tiktok_access_token": "tttok",
@@ -612,19 +431,19 @@ def test_social_save_endpoint(name, tmp_path, monkeypatch):
     )
     assert response.status_code == 302
     saved = json.loads(accounts_file.read_text(encoding="utf-8"))["accounts"][0]
-    assert saved["instagram_enabled"] is True
-    assert saved["instagram_access_token"] == "igtok"
+    assert saved["tiktok_enabled"] is True
+    assert saved["tiktok_access_token"] == "tttok"
     assert saved["tiktok_privacy_level"] == "SELF_ONLY"
 
     # Blank secrets keep the stored values; other forms never clear toggles.
     response = client.post(
         "/api/social/save",
-        data={"account": "A", "instagram_enabled": "true",
-              "instagram_ig_user_id": "1784", "instagram_access_token": ""},
+        data={"account": "A", "tiktok_open_id": "open1",
+              "tiktok_access_token": ""},
     )
     assert response.status_code == 302
     saved = json.loads(accounts_file.read_text(encoding="utf-8"))["accounts"][0]
-    assert saved["instagram_access_token"] == "igtok"
+    assert saved["tiktok_access_token"] == "tttok"
     assert saved["tiktok_enabled"] is True  # untouched by a partial save
 
     # Invalid privacy levels are ignored.
@@ -653,16 +472,11 @@ def test_clean_account_preserves_social_fields(name):
         {
             "name": "A",
             "target_channels": [],
-            "instagram_enabled": "true",
-            "instagram_ig_user_id": "1784",
-            "instagram_access_token": "igtok",
             "tiktok_enabled": "on",
             "tiktok_open_id": "open1",
             "tiktok_privacy_level": "bogus",
         }
     )
-    assert cleaned["instagram_enabled"] is True
-    assert cleaned["instagram_access_token"] == "igtok"
     assert cleaned["tiktok_enabled"] is True
     assert cleaned["tiktok_privacy_level"] == "PUBLIC_TO_EVERYONE"
 
@@ -673,8 +487,7 @@ def test_sources_save_keeps_social_credentials(name, tmp_path, monkeypatch):
     accounts_file = _panel(
         tmp_path, monkeypatch, webui,
         [{"name": "A", "target_channels": [], "enabled": True,
-          "instagram_enabled": True, "instagram_access_token": "igtok",
-          "tiktok_access_token": "tttok"}],
+          "tiktok_enabled": True, "tiktok_access_token": "tttok"}],
     )
     client = webui.create_app(testing=True).test_client()
     response = client.post(
@@ -690,8 +503,7 @@ def test_sources_save_keeps_social_credentials(name, tmp_path, monkeypatch):
     )
     assert response.status_code == 302
     saved = json.loads(accounts_file.read_text(encoding="utf-8"))["accounts"][0]
-    assert saved["instagram_enabled"] is True
-    assert saved["instagram_access_token"] == "igtok"
+    assert saved["tiktok_enabled"] is True
     assert saved["tiktok_access_token"] == "tttok"
 
 
@@ -841,7 +653,7 @@ def test_repost_hook_fires_despite_youtube_result(tmp_path, monkeypatch):
 
     def fake_crosspost(self, account, video_id, video_path, r2_key=None, metadata=None):
         seen.update({"video_id": video_id, "account": account})
-        return {"instagram": "POSTED"}
+        return {"tiktok": "POSTED"}
 
     monkeypatch.setattr(repost_social.SocialDestinations, "crosspost", fake_crosspost)
     ok = scheduler._process_one(
@@ -853,15 +665,15 @@ def test_repost_hook_fires_despite_youtube_result(tmp_path, monkeypatch):
         fetcher=_HookShortsFetcher(raw),
         reprocessor=_HookReprocessor(),
         uploader=_HookUploader(None),
-        account_config={"name": "H", "instagram_enabled": True},
+        account_config={"name": "H", "tiktok_enabled": True},
     )
     assert ok is False  # YouTube failed, but the hook still fired.
-    assert seen == {"video_id": "rhook01", "account": {"name": "H", "instagram_enabled": True}}
+    assert seen == {"video_id": "rhook01", "account": {"name": "H", "tiktok_enabled": True}}
 
 
 def test_end_to_end_cycle_posts_youtube_and_social(tmp_path, monkeypatch):
-    """Full clip-bot cycle with social enabled: YouTube upload + IG Reel +
-    TikTok post, all tracked in the DB. All platform HTTP is mocked."""
+    """Full clip-bot cycle with social enabled: YouTube upload + TikTok post,
+    all tracked in the DB. All platform HTTP is mocked."""
     import yt_shorts_bot.scheduler as clip_scheduler_module
     from yt_shorts_bot.scheduler import ShortsBotScheduler
 
@@ -872,9 +684,6 @@ def test_end_to_end_cycle_posts_youtube_and_social(tmp_path, monkeypatch):
         "shorts_per_video": 1,
         "min_minutes_between_uploads": 0,
         "max_daily_uploads": 10,
-        "instagram_enabled": True,
-        "instagram_ig_user_id": "17841401234567890",
-        "instagram_access_token": "ig-token",
         "tiktok_enabled": True,
         "tiktok_open_id": "open1",
         "tiktok_access_token": "tt-token",
@@ -916,18 +725,6 @@ def test_end_to_end_cycle_posts_youtube_and_social(tmp_path, monkeypatch):
     monkeypatch.setattr(clip_scheduler_module, "YouTubeFetcher", _E2EFetcher)
     monkeypatch.setattr(clip_scheduler_module, "YouTubeUploader", _E2EUploader)
 
-    seen_ig = {}
-
-    def _ig_request(method, url, **kwargs):
-        if url.endswith("/media") and method == "POST":
-            seen_ig.update(kwargs.get("params") or {})
-            return FakeResponse({"id": "container-e2e"})
-        if "container-e2e" in url:
-            return FakeResponse({"status_code": "FINISHED"})
-        if url.endswith("/media_publish"):
-            return FakeResponse({"id": "ig-media-e2e"})
-        raise AssertionError(f"unexpected IG call {method} {url}")
-
     def _tt_post(url, **kwargs):
         if url.endswith("/v2/post/publish/creator_info/query/"):
             return _ok_tiktok({"privacy_level_options": ["PUBLIC_TO_EVERYONE"]})
@@ -943,7 +740,6 @@ def test_end_to_end_cycle_posts_youtube_and_social(tmp_path, monkeypatch):
     def _no_put(*_args, **_kwargs):
         raise AssertionError("URL-pull flow must not PUT chunks")
 
-    monkeypatch.setattr(clip_instagram.requests, "request", _ig_request)
     monkeypatch.setattr(clip_tiktok.requests, "post", _tt_post)
     monkeypatch.setattr(clip_tiktok.requests, "put", _no_put)
 
@@ -960,9 +756,5 @@ def test_end_to_end_cycle_posts_youtube_and_social(tmp_path, monkeypatch):
 
     assert scheduler.run_single_cycle(accounts=scheduler.accounts) == 1
     assert db.get_video_state("e2evid00001", "E2E")["status"] == "UPLOADED_YOUTUBE"
-    assert seen_ig["caption"] == "E2E Short #e2e\n\n#clips"
-    assert seen_ig["video_url"].startswith("https://cdn.example/shorts/")
-    ig = db.get_social_post("e2evid00001", "E2E", "instagram")
     tt = db.get_social_post("e2evid00001", "E2E", "tiktok")
-    assert (ig["status"], ig["remote_id"]) == ("POSTED", "ig-media-e2e")
     assert (tt["status"], tt["remote_id"]) == ("POSTED", "tt-pub-e2e")

@@ -206,9 +206,8 @@ class CloudStorageManager:
     def public_url_for_key(self, r2_key: Optional[str]) -> str:
         """Public HTTPS URL for an R2 object, or "" when unavailable.
 
-        Instagram's API fetches the video from Meta's servers, so Reels
-        cross-posting needs the bucket exposed at R2_PUBLIC_BASE_URL. TikTok
-        uploads the file bytes directly and never needs this URL.
+        TikTok can pull the video from this URL when the bucket is exposed at
+        R2_PUBLIC_BASE_URL; otherwise the file bytes are uploaded directly.
         """
         if not r2_key or not str(r2_key).strip():
             return ""

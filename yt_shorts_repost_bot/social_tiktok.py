@@ -10,7 +10,7 @@ Requires a TikTok developer app with the video.upload + video.publish scopes.
 Direct Post shows publicly only after the app passes TikTok's audit; until
 then posts land as private. Access tokens expire after ~24h - when the app's
 client key/secret plus a refresh token are configured, the bot refreshes them
-automatically and persists the new tokens. Setup: SETUP_INSTAGRAM_TIKTOK.md.
+automatically and persists the new tokens. Setup: SETUP_TIKTOK.md.
 """
 from __future__ import annotations
 

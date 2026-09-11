@@ -161,9 +161,8 @@ R2_ENDPOINT_URL: str = os.getenv(
 R2_MAX_BUCKET_BYTES: int = int(os.getenv("R2_MAX_BUCKET_BYTES", str(8 * 1024 * 1024 * 1024)))
 
 # Public base URL for the R2 bucket (custom domain or r2.dev public URL), e.g.
-# "https://clips.example.com". Required ONLY for Instagram Reels cross-posting:
-# Meta's servers fetch the video from this public URL. Leave empty and Instagram
-# cross-posting stays disabled (TikTok uploads the file directly and needs no URL).
+# "https://clips.example.com". Optional: TikTok can pull the video from this
+# public URL; when it is empty the rendered file is uploaded directly.
 R2_PUBLIC_BASE_URL: str = os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/")
 
 # --- YOUTUBE DATA API V3 SETTINGS ---

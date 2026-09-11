@@ -1,10 +1,10 @@
-"""Cross-post finished Shorts to Instagram Reels and TikTok.
+"""Cross-post finished Shorts to TikTok.
 
 Each destination account opts in independently via the control panel
-(``instagram_enabled`` / ``tiktok_enabled`` plus that platform's credentials).
+(``tiktok_enabled`` plus that platform's credentials).
 Cross-posting runs AFTER a Short is rendered and is independent of the YouTube
 result: a YouTube quota wait, auth failure, or failed upload never blocks the
-Instagram/TikTok post, and a failed social post never blocks YouTube.
+TikTok post, and a failed social post never blocks YouTube.
 
 Idempotency: every attempt is recorded in the ``social_posts`` table, so a
 retry never publishes the same Short twice to the same platform. DRY_RUN mode
@@ -21,12 +21,10 @@ from typing import Any, Optional
 
 from .config import ACCOUNTS_FILE, DRY_RUN, logger
 from .models import StateDB
-from .social_instagram import InstagramAPIError, InstagramReelsUploader
 from .social_tiktok import TITLE_MAX_LEN as TIKTOK_TITLE_MAX_LEN
 from .social_tiktok import TikTokAPIError, TikTokUploader
 from .storage import CloudStorageManager
 
-DEST_INSTAGRAM = "instagram"
 DEST_TIKTOK = "tiktok"
 
 SOCIAL_POSTED = "POSTED"
@@ -35,10 +33,7 @@ SOCIAL_SKIPPED = "SKIPPED"
 SOCIAL_DRY_RUN = "DRY_RUN_READY"
 SOCIAL_ALREADY_POSTED = "ALREADY_POSTED"
 
-INSTAGRAM_CAPTION_MAX_LEN = 2200
-
 _TOKEN_KEYS = {
-    DEST_INSTAGRAM: ("instagram_access_token",),
     DEST_TIKTOK: ("tiktok_access_token", "tiktok_refresh_token"),
 }
 
@@ -47,8 +42,6 @@ def is_enabled(account: Optional[dict], destination: str) -> bool:
     """Has this destination account opted into cross-posting?"""
     if not account:
         return False
-    if destination == DEST_INSTAGRAM:
-        return bool(account.get("instagram_enabled"))
     if destination == DEST_TIKTOK:
         return bool(account.get("tiktok_enabled"))
     return False
@@ -67,11 +60,8 @@ def build_social_caption(metadata: Optional[dict], destination: str) -> str:
     lowered_title = title.lower()
     fresh = [tag for tag in tags if tag.lower() not in lowered_title]
     tag_line = " ".join(f"#{tag}" for tag in fresh)
-    if destination == DEST_TIKTOK:
-        # TikTok titles are a single short line.
-        return " ".join(f"{title} {tag_line}".split())[:TIKTOK_TITLE_MAX_LEN]
-    text = title + (f"\n\n{tag_line}" if tag_line else "")
-    return text[:INSTAGRAM_CAPTION_MAX_LEN]
+    # TikTok titles are a single short line.
+    return " ".join(f"{title} {tag_line}".split())[:TIKTOK_TITLE_MAX_LEN]
 
 
 def save_social_tokens(account_name: str, destination: str, values: dict) -> bool:
@@ -152,18 +142,13 @@ class SocialDestinations:
         name = str(account.get("name") or "").strip()
         if not name:
             return results
-        for destination in (DEST_INSTAGRAM, DEST_TIKTOK):
+        for destination in (DEST_TIKTOK,):
             if not is_enabled(account, destination):
                 continue
             try:
-                if destination == DEST_INSTAGRAM:
-                    results[destination] = self._crosspost_instagram(
-                        account, name, video_id, r2_key, metadata
-                    )
-                else:
-                    results[destination] = self._crosspost_tiktok(
-                        account, name, video_id, video_path, r2_key, metadata
-                    )
+                results[destination] = self._crosspost_tiktok(
+                    account, name, video_id, video_path, r2_key, metadata
+                )
             except Exception as exc:
                 # A social failure must never break the YouTube pipeline.
                 logger.warning(
@@ -224,61 +209,6 @@ class SocialDestinations:
             return self.storage.public_url_for_key(r2_key) if r2_key else ""
         except Exception:
             return ""
-
-    # ------------------------------------------------------------------
-    def _crosspost_instagram(
-        self,
-        account: dict,
-        name: str,
-        video_id: str,
-        r2_key: Optional[str],
-        metadata: Optional[dict],
-    ) -> str:
-        if self._already_posted(video_id, name, DEST_INSTAGRAM):
-            logger.info("[%s] Instagram: already posted; skipping.", name)
-            return SOCIAL_ALREADY_POSTED
-        ig_user_id = str(account.get("instagram_ig_user_id") or "").strip()
-        token = str(account.get("instagram_access_token") or "").strip()
-        if not ig_user_id or not token:
-            reason = "Instagram is enabled but the user ID / access token is missing."
-            logger.warning("[%s] %s", name, reason)
-            self._record(video_id, name, DEST_INSTAGRAM, SOCIAL_SKIPPED, error_msg=reason)
-            return SOCIAL_SKIPPED
-        if self.dry_run:
-            logger.info("[%s] [DRY-RUN] Instagram Reel prepared but not published.", name)
-            self._record(video_id, name, DEST_INSTAGRAM, SOCIAL_DRY_RUN)
-            return SOCIAL_DRY_RUN
-        video_url = self._public_video_url(r2_key)
-        if not video_url:
-            reason = (
-                "Instagram needs a public video URL: enable the R2 backup and set "
-                "R2_PUBLIC_BASE_URL so Meta's servers can fetch the video."
-            )
-            logger.warning("[%s] %s", name, reason)
-            self._record(video_id, name, DEST_INSTAGRAM, SOCIAL_SKIPPED, error_msg=reason)
-            return SOCIAL_SKIPPED
-
-        def _on_token(token_value: str) -> None:
-            save_social_tokens(name, DEST_INSTAGRAM, {"instagram_access_token": token_value})
-
-        uploader = InstagramReelsUploader(
-            ig_user_id=ig_user_id,
-            access_token=token,
-            app_id=str(account.get("instagram_app_id") or ""),
-            app_secret=str(account.get("instagram_app_secret") or ""),
-            dry_run=False,
-            on_token_refreshed=_on_token,
-        )
-        try:
-            caption = build_social_caption(metadata, DEST_INSTAGRAM)
-            media_id = uploader.publish_reel(video_url, caption)
-        except InstagramAPIError as exc:
-            logger.warning("[%s] Instagram Reel failed: %s", name, exc)
-            self._record(video_id, name, DEST_INSTAGRAM, SOCIAL_FAILED, error_msg=str(exc))
-            return SOCIAL_FAILED
-        logger.info("[%s] Instagram Reel published (media id %s).", name, media_id)
-        self._record(video_id, name, DEST_INSTAGRAM, SOCIAL_POSTED, remote_id=media_id)
-        return SOCIAL_POSTED
 
     # ------------------------------------------------------------------
     def _crosspost_tiktok(

@@ -22,7 +22,7 @@ STOPWORDS = set(
     those through to too under until up very was we were what when where which
     while who whom why will with you your yours yourself yourselves youtube video
     watch official channel shorts subscribe clip clips like share comment
-    http https www com org net co uk bit ly href link bio tiktok instagram""".split()
+    http https www com org net co uk bit ly href link bio tiktok""".split()
 )
 
 
