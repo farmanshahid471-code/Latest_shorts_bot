@@ -380,12 +380,32 @@ def _finished_files() -> list:
     return files
 
 
-def _redirect_msg(msg: str, ok: bool = True, account: str = None):
-    """Redirect back to the SAME tab (account) the user was on - so a save in
-    one tab never 'jumps' to another tab and looks like it saved everywhere."""
+# Platform tabs: the top-level tab strip. Each one owns the connection UI for
+# that destination; the account sub-tabs below it stay the same everywhere.
+PLATFORMS = ("youtube", "tiktok", "bilibili")
+PLATFORM_LABELS = {
+    "youtube": "▶️ YouTube",
+    "tiktok": "🎵 TikTok",
+    "bilibili": "📺 Bilibili",
+}
+
+
+def _clean_platform(value) -> str:
+    """Normalise the ?platform= query value to a known platform tab."""
+    platform = str(value or "").strip().lower()
+    return platform if platform in PLATFORMS else "youtube"
+
+
+def _redirect_msg(msg: str, ok: bool = True, account: str = None,
+                  platform: str = None):
+    """Redirect back to the SAME tab (account + platform) the user was on - so
+    a save in one tab never 'jumps' to another tab and looks like it saved
+    everywhere."""
     params = {"msg": msg, "type": "ok" if ok else "err"}
     if account:
         params["account"] = account
+    if platform:
+        params["platform"] = _clean_platform(platform)
     return redirect("/?" + urlencode(params))
 
 
@@ -534,13 +554,18 @@ def create_app(testing: bool = False) -> Flask:
                 return default
         return val.strip() if isinstance(val, str) else val
 
-    def _page(msg: str = "", msg_type: str = "ok", loaded_account: str = None):
-        return Response(_render_page(msg, msg_type, loaded_account), mimetype="text/html")
+    def _page(msg: str = "", msg_type: str = "ok", loaded_account: str = None,
+              platform: str = "youtube"):
+        return Response(
+            _render_page(msg, msg_type, loaded_account, platform),
+            mimetype="text/html",
+        )
 
     @app.get("/")
     def index():
         return _page(request.args.get("msg", ""), request.args.get("type", "ok"),
-                     request.args.get("account") or None)
+                     request.args.get("account") or None,
+                     _clean_platform(request.args.get("platform")))
 
     @app.get("/api/health")
     def api_health():
@@ -852,7 +877,11 @@ def create_app(testing: bool = False) -> Flask:
                 acc["tiktok_privacy_level"] = level
         _write_accounts(accounts)
         logger.info("[webui] Saved cross-posting settings for account '%s' (secrets not logged).", name)
-        return _redirect_msg(f"Cross-posting settings saved for account '{name}'.", account=name)
+        return _redirect_msg(
+            f"Cross-posting settings saved for account '{name}'.",
+            account=name,
+            platform=_clean_platform(_f(request, "platform")),
+        )
 
     @app.post("/api/test-tiktok")
     def api_test_tiktok():
@@ -881,7 +910,8 @@ def create_app(testing: bool = False) -> Flask:
                 logger.error("[webui] TikTok check error for '%s': %s", target.get("name"), exc)
 
         _spawn_job("test-tiktok", _do)
-        return _redirect_msg("Testing TikTok - watch the logs.", account=target.get("name"))
+        return _redirect_msg("Testing TikTok - watch the logs.",
+                             account=target.get("name"), platform="tiktok")
 
     # ---------------- ACCOUNT SETTINGS (per-account) ----------------
     @app.post("/api/test-bilibili")
@@ -910,7 +940,8 @@ def create_app(testing: bool = False) -> Flask:
                 logger.error("[webui] Bilibili check error for '%s': %s", target.get("name"), exc)
 
         _spawn_job("test-bilibili", _do)
-        return _redirect_msg("Testing Bilibili - watch the logs.", account=target.get("name"))
+        return _redirect_msg("Testing Bilibili - watch the logs.",
+                             account=target.get("name"), platform="bilibili")
 
     @app.post("/api/account-settings/save")
     def api_account_settings_save():
@@ -1098,7 +1129,11 @@ def create_app(testing: bool = False) -> Flask:
             "token": relative_credential_value(name, "token.json"),
         })
         _write_accounts(accounts)
-        return _redirect_msg(f"Account '{name}' added - configure it in its tab.", account=name)
+        return _redirect_msg(
+            f"Account '{name}' added - configure it in its tab.",
+            account=name,
+            platform=_clean_platform(_f(request, "platform")),
+        )
 
     @app.post("/api/accounts/delete")
     def api_accounts_delete():
@@ -1187,7 +1222,10 @@ def create_app(testing: bool = False) -> Flask:
 
 
 # ---------------------------------------------------------------------------
-def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[str] = None) -> str:
+def _render_page(msg: str = "", msg_type: str = "ok",
+                 loaded_account: Optional[str] = None,
+                 platform: str = "youtube") -> str:
+    platform = _clean_platform(platform)
     db = StateDB()
     total_bytes, objects = CloudStorageManager().get_bucket_usage()
     mode = _mode_info()
@@ -1298,15 +1336,15 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
     def _secret_hint(has_value: bool, empty_hint: str) -> str:
         return "saved ✓ (leave blank to keep)" if has_value else empty_hint
 
-    social_card = f"""
+    tiktok_card = f"""
     <div class="card" style="margin-top:16px;">
-      <h2 style="font-size:14px;">📣 Cross-post to TikTok &amp; Bilibili {tt_badge} {bb_badge}</h2>
+      <h2 style="font-size:14px;">🎵 Post to TikTok {tt_badge}</h2>
       <div class="hint">After each Short is rendered, the bot ALSO posts it here — even when the
-        YouTube upload waits on quota or fails. Uses the official TikTok and
-        Bilibili APIs (no password logins). Full setup steps:
-        <b>SETUP_TIKTOK.md</b>, <b>SETUP_BILIBILI.md</b>.</div>
+        YouTube upload waits on quota or fails. Uses the official TikTok API
+        (no password logins). Full setup steps: <b>SETUP_TIKTOK.md</b>.</div>
       <form action="/api/social/save" method="POST">
         <input type="hidden" name="account" value="{_esc(loaded_account)}">
+        <input type="hidden" name="platform" value="tiktok">
         <table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:6px;">
           <tr><td style="padding:4px 0;width:38%;">Post to TikTok</td>
               <td><input type="checkbox" name="tiktok_enabled" value="true"{chk(soc["tiktok_enabled"])} style="transform:scale(1.3);"></td></tr>
@@ -1322,8 +1360,34 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
               <td><input type="password" name="tiktok_client_secret" value="" placeholder="{_secret_hint(soc["tiktok_has_client_secret"], "needed for auto-renewal")}" style="width:100%;" autocomplete="off"></td></tr>
           <tr><td style="padding:4px 0;">TikTok privacy</td>
               <td><select name="tiktok_privacy_level" style="width:100%;">{privacy_options}</select></td></tr>
-          <tr><td colspan="2" style="padding:10px 0 2px;"><b>Bilibili</b></td></tr>
-          <tr><td style="padding:4px 0;">Post to Bilibili</td>
+        </table>
+        <div class="row" style="margin-top:10px;"><button type="submit">Save TikTok settings</button></div>
+      </form>
+      <div class="row" style="margin-top:10px;">
+        <form action="/api/test-tiktok" method="POST" style="display:inline;">
+          <input type="hidden" name="account" value="{_esc(loaded_account)}">
+          <button class="green" type="submit">Test TikTok</button>
+        </form>
+      </div>
+      <div class="hint" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:8px;">
+        TikTok uploads the rendered file directly (a public R2 URL is used when available).
+        The refresh token + client key/secret renew its ~24h access token automatically.
+        Secrets live in the ignored accounts.json and are never shown back.
+      </div>
+    </div>
+    """
+
+    bilibili_card = f"""
+    <div class="card" style="margin-top:16px;">
+      <h2 style="font-size:14px;">📺 Post to Bilibili {bb_badge}</h2>
+      <div class="hint">After each Short is rendered, the bot ALSO submits it to Bilibili — even
+        when the YouTube upload waits on quota or fails. Uses the official Open Platform
+        API (no password logins). Full setup steps: <b>SETUP_BILIBILI.md</b>.</div>
+      <form action="/api/social/save" method="POST">
+        <input type="hidden" name="account" value="{_esc(loaded_account)}">
+        <input type="hidden" name="platform" value="bilibili">
+        <table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:6px;">
+          <tr><td style="padding:4px 0;width:38%;">Post to Bilibili</td>
               <td><input type="checkbox" name="bilibili_enabled" value="true"{chk(soc["bilibili_enabled"])} style="transform:scale(1.3);"></td></tr>
           <tr><td style="padding:4px 0;">Bilibili client id</td>
               <td><input type="text" name="bilibili_client_id" value="{_esc(soc["bilibili_client_id"])}" style="width:100%;"></td></tr>
@@ -1340,23 +1404,19 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
           <tr><td style="padding:4px 0;">Repost source (转载 only)</td>
               <td><input type="text" name="bilibili_source" value="{_esc(soc["bilibili_source"])}" placeholder="original video URL" style="width:100%;"></td></tr>
         </table>
-        <div class="row" style="margin-top:10px;"><button type="submit">Save cross-posting</button></div>
+        <div class="row" style="margin-top:10px;"><button type="submit">Save Bilibili settings</button></div>
       </form>
       <div class="row" style="margin-top:10px;">
-        <form action="/api/test-tiktok" method="POST" style="display:inline;">
-          <input type="hidden" name="account" value="{_esc(loaded_account)}">
-          <button class="green" type="submit">Test TikTok</button>
-        </form>
         <form action="/api/test-bilibili" method="POST" style="display:inline;">
           <input type="hidden" name="account" value="{_esc(loaded_account)}">
           <button class="green" type="submit">Test Bilibili</button>
         </form>
       </div>
       <div class="hint" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:8px;">
-        TikTok uploads the rendered file directly (a public R2 URL is used when available);
-        Bilibili always uploads the local file and its archives go through review before
-        they appear. Both refresh tokens renew the short-lived access token
-        automatically. Secrets live in the ignored accounts.json and are never shown back.
+        Bilibili always uploads the local file (there is no pull-from-URL flow), and every
+        archive goes through 审核 review before it appears publicly. The refresh token +
+        client id/secret renew the access token automatically. Secrets live in the ignored
+        accounts.json and are never shown back.
       </div>
     </div>
     """
@@ -1374,7 +1434,27 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
         color = "#30d158" if msg_type == "ok" else "#ff453a"
         msg_html = f'<div style="background:{color}22;border:1px solid {color};border-radius:10px;padding:12px;margin-top:16px;font-size:14px;">{_esc(msg)}</div>'
 
-    # -------- TABS (like Chrome): one per account + a "+" tab --------
+    # -------- PLATFORM TABS (top level): YouTube / TikTok / Bilibili --------
+    # Each platform tab shows the same account sub-tabs underneath, so the
+    # user picks "where to post" first and "which channel" second.
+    platform_status = {
+        "youtube": bool(st["connected"]),
+        "tiktok": bool(soc["tiktok_enabled"] and soc["tiktok_open_id"]
+                       and soc["tiktok_has_token"]),
+        "bilibili": bool(soc["bilibili_enabled"] and soc["bilibili_client_id"]
+                         and soc["bilibili_has_token"]),
+    }
+    platform_tabs = ""
+    for key in PLATFORMS:
+        active = "ptab-active" if key == platform else ""
+        dot_color = "var(--green)" if platform_status.get(key) else "var(--muted)"
+        dot = f'<span class="tab-dot" style="background:{dot_color};"></span>'
+        platform_tabs += (
+            f'<a class="ptab {active}" href="/?account={quote(str(loaded_account))}'
+            f'&platform={key}">{dot}{PLATFORM_LABELS[key]}</a>'
+        )
+
+    # -------- ACCOUNT SUB-TABS (like Chrome): one per account + a "+" tab -----
     tabs = ""
     for a in disk_accounts:
         aname = str(a.get("name") or "default")
@@ -1395,10 +1475,12 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
         label = str(aname)
         if len(label) > 18:
             label = label[:17] + "…"
-        tabs += (f'<a class="tab {active}" href="/?account={quote(str(aname))}" '
+        tabs += (f'<a class="tab {active}" '
+                 f'href="/?account={quote(str(aname))}&platform={platform}" '
                  f'style="display:inline-flex;align-items:center;gap:6px;">{badge}{_esc(label)}</a>')
     tabs += (
         '<form action="/api/accounts/add" method="POST" style="display:inline;">'
+        + f'<input type="hidden" name="platform" value="{platform}">'
         + '<button class="tab tab-add" type="submit" title="Add account">+</button></form>'
     )
 
@@ -1463,92 +1545,8 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
 
     log_lines = "".join(f"<div>{_esc(l)}</div>" for l in _tail_log(80))
 
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>🎬 Shorts Bot Control Panel</title>
-<style>
-  :root {{ --bg:#0d0d12; --card:#16161d; --card2:#1d1d27; --text:#eef0f5; --muted:#9aa0ae;
-    --pink:#fe2c55; --cyan:#25f4ee; --yellow:#ffd60a; --green:#30d158; --red:#ff453a; --border:#26262f; }}
-  * {{ box-sizing:border-box; margin:0; padding:0; }}
-  body {{ background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
-    padding:24px 16px 60px; max-width:1100px; margin:0 auto; }}
-  h1 {{ font-size:24px; }} .sub {{ color:var(--muted); font-size:13px; margin-top:4px; }}
-  .badges {{ margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
-  .badge {{ font-size:12px; font-weight:700; padding:4px 12px; border-radius:999px; background:var(--card2);
-    border:1px solid var(--border); color:var(--muted); }}
-  .badge.ok {{ color:var(--green); border-color:var(--green); }} .badge.warn {{ color:var(--yellow); border-color:var(--yellow); }}
-  .badge.run {{ color:var(--cyan); border-color:var(--cyan); }}
-  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:20px; }}
-  .stat {{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px; }}
-  .stat .num {{ font-size:26px; font-weight:800; margin-top:6px; }} .stat .lbl {{ font-size:12px; color:var(--muted); text-transform:uppercase; }}
-  .card {{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:18px; margin-top:20px; }}
-  .card h2 {{ font-size:16px; margin-bottom:12px; }}
-  button {{ background:var(--pink); color:#fff; border:0; border-radius:10px; padding:10px 16px; font-size:14px; font-weight:700; cursor:pointer; }}
-  button:hover {{ filter:brightness(1.12); }} button.cyan {{ background:var(--cyan); color:#04161a; }}
-  button.gray {{ background:var(--card2); border:1px solid var(--border); color:var(--text); }} button.green {{ background:var(--green); color:#04120a; }}
-  button.red {{ background:var(--red); }}
-  .row {{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
-  input[type=text], input[type=password], input[type=time], input[type=number], textarea, select {{ background:var(--card2); border:1px solid var(--border); color:var(--text);
-    border-radius:10px; padding:10px 12px; font-size:14px; }}
-  input[type=text] {{ flex:1; min-width:200px; }} input[type=file] {{ color:var(--muted); font-size:13px; }}
-  .hint {{ font-size:12px; color:var(--muted); margin-top:8px; line-height:1.5; }}
-  pre.logs {{ background:#0a0a0f; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:11.5px;
-    line-height:1.55; font-family:Consolas,Menlo,monospace; white-space:pre-wrap; word-break:break-word;
-    max-height:380px; overflow-y:auto; color:#c9cdd8; }}
-  .track {{ display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px; }}
-  .track:last-child {{ border-bottom:0; }} .track .sz {{ color:var(--muted); }}
-  .empty {{ color:var(--muted); font-size:13px; padding:8px 0; }}
-  /* ---- TABS (Chrome-like) ---- */
-  .tabbar {{ display:flex; gap:4px; margin-top:18px; overflow-x:auto; padding-bottom:0; border-bottom:2px solid var(--border); }}
-  .tab {{ background:var(--card2); border:1px solid var(--border); border-bottom:none; border-radius:10px 10px 0 0;
-    padding:10px 16px; font-size:14px; font-weight:600; color:var(--muted); text-decoration:none; white-space:nowrap; }}
-  .tab.tab-active {{ background:var(--card); color:var(--cyan); border-color:var(--cyan); }}
-  .tab.tab-add {{ background:transparent; border-style:dashed; color:var(--green); font-size:20px; padding:6px 14px; }}
-  .tab-dot {{ width:8px; height:8px; border-radius:50%; display:inline-block; }}
-</style>
-</head>
-<body>
-  <noscript><div style="background:#ff453a;color:#fff;padding:12px;border-radius:10px;margin-bottom:16px;text-align:center;font-weight:700;">
-    ⚠️ JavaScript is DISABLED. The panel still works - all buttons are plain forms. Only live auto-refresh is off.
-  </div></noscript>
-
-  <h1>🎬 Shorts Bot Control Panel</h1>
-  <div class="sub">Each tab = one of YOUR channels. Configure separately, run all together.</div>
-  <div class="badges">
-    <span class="badge" style="border-color:var(--pink);color:var(--pink);">v7.3 (Sep 3, 2026)</span>
-    {mode_badge} {sched_badge} {jobs_badge}
-  </div>
-
-  {msg_html}
-
-  <div class="grid">
-    <div class="stat"><div class="lbl">Uploads (24h)</div><div class="num" id="sUploads">{uploads_24h}</div></div>
-    <div class="stat"><div class="lbl">Shorts made</div><div class="num" id="sShorts">{total_shorts}</div></div>
-    <div class="stat"><div class="lbl">R2 storage</div><div class="num" id="sR2">{total_bytes / (1024**3):.2f} GB</div></div>
-    <div class="stat"><div class="lbl">Accounts</div><div class="num" id="sAcc">{len(disk_accounts)}</div></div>
-  </div>
-
-  <!-- ======================= TABS (Chrome-like) ======================= -->
-  <div class="tabbar">
-    {tabs}
-  </div>
-
-  <!-- ======================= ACTIVE ACCOUNT TAB ======================= -->
-  <div class="card">
-    <div class="row" style="justify-content:space-between; flex-wrap:wrap;">
-      <h2 style="margin:0;">👤 {_esc(loaded_account)} {connected_html}
-        <span style="font-size:12px;color:var(--muted);font-weight:400;"> · {st['uploads']}/{st['max_daily']} uploads today</span>
-      </h2>
-      <form action="/api/accounts/delete" method="POST" style="display:inline;">
-        <input type="hidden" name="account" value="{_esc(loaded_account)}">
-        <button class="red" type="submit" onclick="return confirm('Delete this account tab and its settings? OAuth files remain on disk until you remove the account folder manually.');">🗑 Delete this account</button>
-      </form>
-    </div>
-
-      <div class="card" style="margin-top:16px;">
+    youtube_card = f"""
+    <div class="card" style="margin-top:16px;">
       <h2 style="font-size:14px;">🔑 Credentials</h2>
       <form action="/api/client-secret" method="POST" enctype="multipart/form-data">
         <input type="hidden" name="account" value="{_esc(loaded_account)}">
@@ -1601,8 +1599,117 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
         </div>
       </div>
     </div>
+    """
 
-    {social_card}
+    # Only the active platform tab's connection panel is rendered; the
+    # account settings and source channels below stay shared.
+    platform_panel = {
+        "youtube": youtube_card,
+        "tiktok": tiktok_card,
+        "bilibili": bilibili_card,
+    }[platform]
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🎬 Shorts Bot Control Panel</title>
+<style>
+  :root {{ --bg:#0d0d12; --card:#16161d; --card2:#1d1d27; --text:#eef0f5; --muted:#9aa0ae;
+    --pink:#fe2c55; --cyan:#25f4ee; --yellow:#ffd60a; --green:#30d158; --red:#ff453a; --border:#26262f; }}
+  * {{ box-sizing:border-box; margin:0; padding:0; }}
+  body {{ background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+    padding:24px 16px 60px; max-width:1100px; margin:0 auto; }}
+  h1 {{ font-size:24px; }} .sub {{ color:var(--muted); font-size:13px; margin-top:4px; }}
+  .badges {{ margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+  .badge {{ font-size:12px; font-weight:700; padding:4px 12px; border-radius:999px; background:var(--card2);
+    border:1px solid var(--border); color:var(--muted); }}
+  .badge.ok {{ color:var(--green); border-color:var(--green); }} .badge.warn {{ color:var(--yellow); border-color:var(--yellow); }}
+  .badge.run {{ color:var(--cyan); border-color:var(--cyan); }}
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:20px; }}
+  .stat {{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px; }}
+  .stat .num {{ font-size:26px; font-weight:800; margin-top:6px; }} .stat .lbl {{ font-size:12px; color:var(--muted); text-transform:uppercase; }}
+  .card {{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:18px; margin-top:20px; }}
+  .card h2 {{ font-size:16px; margin-bottom:12px; }}
+  button {{ background:var(--pink); color:#fff; border:0; border-radius:10px; padding:10px 16px; font-size:14px; font-weight:700; cursor:pointer; }}
+  button:hover {{ filter:brightness(1.12); }} button.cyan {{ background:var(--cyan); color:#04161a; }}
+  button.gray {{ background:var(--card2); border:1px solid var(--border); color:var(--text); }} button.green {{ background:var(--green); color:#04120a; }}
+  button.red {{ background:var(--red); }}
+  .row {{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
+  input[type=text], input[type=password], input[type=time], input[type=number], textarea, select {{ background:var(--card2); border:1px solid var(--border); color:var(--text);
+    border-radius:10px; padding:10px 12px; font-size:14px; }}
+  input[type=text] {{ flex:1; min-width:200px; }} input[type=file] {{ color:var(--muted); font-size:13px; }}
+  .hint {{ font-size:12px; color:var(--muted); margin-top:8px; line-height:1.5; }}
+  pre.logs {{ background:#0a0a0f; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:11.5px;
+    line-height:1.55; font-family:Consolas,Menlo,monospace; white-space:pre-wrap; word-break:break-word;
+    max-height:380px; overflow-y:auto; color:#c9cdd8; }}
+  .track {{ display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px; }}
+  .track:last-child {{ border-bottom:0; }} .track .sz {{ color:var(--muted); }}
+  .empty {{ color:var(--muted); font-size:13px; padding:8px 0; }}
+  /* ---- TABS (Chrome-like) ---- */
+  .tabbar {{ display:flex; gap:4px; margin-top:18px; overflow-x:auto; padding-bottom:0; border-bottom:2px solid var(--border); }}
+  .tab {{ background:var(--card2); border:1px solid var(--border); border-bottom:none; border-radius:10px 10px 0 0;
+    padding:10px 16px; font-size:14px; font-weight:600; color:var(--muted); text-decoration:none; white-space:nowrap; }}
+  .tab.tab-active {{ background:var(--card); color:var(--cyan); border-color:var(--cyan); }}
+  .tab.tab-add {{ background:transparent; border-style:dashed; color:var(--green); font-size:20px; padding:6px 14px; }}
+  .tab-dot {{ width:8px; height:8px; border-radius:50%; display:inline-block; }}
+  /* ---- PLATFORM TABS (top level) ---- */
+  .ptabbar {{ display:flex; gap:8px; margin-top:22px; flex-wrap:wrap; }}
+  .ptab {{ display:inline-flex; align-items:center; gap:8px; background:var(--card2);
+    border:1px solid var(--border); border-radius:12px; padding:11px 20px; font-size:15px;
+    font-weight:700; color:var(--muted); text-decoration:none; }}
+  .ptab:hover {{ color:var(--text); }}
+  .ptab.ptab-active {{ background:var(--card); color:var(--pink); border-color:var(--pink); }}
+  .subtab-label {{ font-size:11px; color:var(--muted); text-transform:uppercase;
+    letter-spacing:0.06em; margin:18px 0 6px; }}
+</style>
+</head>
+<body>
+  <noscript><div style="background:#ff453a;color:#fff;padding:12px;border-radius:10px;margin-bottom:16px;text-align:center;font-weight:700;">
+    ⚠️ JavaScript is DISABLED. The panel still works - all buttons are plain forms. Only live auto-refresh is off.
+  </div></noscript>
+
+  <h1>🎬 Shorts Bot Control Panel</h1>
+  <div class="sub">Pick a platform on top, then the channel below it. Each channel is configured separately and they all run together.</div>
+  <div class="badges">
+    <span class="badge" style="border-color:var(--pink);color:var(--pink);">v7.3 (Sep 3, 2026)</span>
+    {mode_badge} {sched_badge} {jobs_badge}
+  </div>
+
+  {msg_html}
+
+  <div class="grid">
+    <div class="stat"><div class="lbl">Uploads (24h)</div><div class="num" id="sUploads">{uploads_24h}</div></div>
+    <div class="stat"><div class="lbl">Shorts made</div><div class="num" id="sShorts">{total_shorts}</div></div>
+    <div class="stat"><div class="lbl">R2 storage</div><div class="num" id="sR2">{total_bytes / (1024**3):.2f} GB</div></div>
+    <div class="stat"><div class="lbl">Accounts</div><div class="num" id="sAcc">{len(disk_accounts)}</div></div>
+  </div>
+
+  <!-- ================== PLATFORM TABS (top level) ================== -->
+  <div class="ptabbar">
+    {platform_tabs}
+  </div>
+
+  <!-- ============ ACCOUNT SUB-TABS (Chrome-like) for that platform ============ -->
+  <div class="subtab-label">Channels</div>
+  <div class="tabbar">
+    {tabs}
+  </div>
+
+  <!-- ======================= ACTIVE ACCOUNT TAB ======================= -->
+  <div class="card">
+    <div class="row" style="justify-content:space-between; flex-wrap:wrap;">
+      <h2 style="margin:0;">👤 {_esc(loaded_account)} {connected_html}
+        <span style="font-size:12px;color:var(--muted);font-weight:400;"> · {st['uploads']}/{st['max_daily']} uploads today</span>
+      </h2>
+      <form action="/api/accounts/delete" method="POST" style="display:inline;">
+        <input type="hidden" name="account" value="{_esc(loaded_account)}">
+        <button class="red" type="submit" onclick="return confirm('Delete this account tab and its settings? OAuth files remain on disk until you remove the account folder manually.');">🗑 Delete this account</button>
+      </form>
+    </div>
+
+    {platform_panel}
 
     <div class="card">
       <h2 style="font-size:14px;">⚙️ Settings for this account</h2>

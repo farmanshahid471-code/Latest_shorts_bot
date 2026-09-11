@@ -1082,3 +1082,84 @@ def test_end_to_end_cycle_posts_youtube_and_social(tmp_path, monkeypatch):
     assert db.get_video_state("e2evid00001", "E2E")["status"] == "UPLOADED_YOUTUBE"
     tt = db.get_social_post("e2evid00001", "E2E", "tiktok")
     assert (tt["status"], tt["remote_id"]) == ("POSTED", "tt-pub-e2e")
+
+
+# ---------------------------------------------------------------------------
+# Panel layout: platform tabs (top level) + account sub-tabs (second level)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_platform_tabs_render_only_their_own_panel(name, tmp_path, monkeypatch):
+    webui = WEBUI_MODULES[name]
+    _panel(
+        tmp_path, monkeypatch, webui,
+        [{"name": "A", "target_channels": [], "enabled": True},
+         {"name": "B", "target_channels": [], "enabled": True}],
+    )
+    client = webui.create_app(testing=True).test_client()
+    panels = {
+        "youtube": "🔑 Credentials",
+        "tiktok": "🎵 Post to TikTok",
+        "bilibili": "📺 Post to Bilibili",
+    }
+    for platform, marker in panels.items():
+        html = client.get(f"/?account=A&platform={platform}").get_data(as_text=True)
+        assert marker in html
+        # The other platforms' connection panels stay hidden.
+        for other, other_marker in panels.items():
+            if other != platform:
+                assert other_marker not in html
+        # The active platform tab is highlighted...
+        assert f'ptab ptab-active" href="/?account=A&platform={platform}"' in html
+        # ...and both account sub-tabs remain available underneath it.
+        assert f'href="/?account=B&platform={platform}"' in html
+        # Shared per-account cards are not duplicated per platform.
+        assert html.count("Settings for this account") == 1
+        assert html.count("Source channels for this account") == 1
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_unknown_platform_falls_back_to_youtube(name, tmp_path, monkeypatch):
+    webui = WEBUI_MODULES[name]
+    _panel(tmp_path, monkeypatch, webui,
+           [{"name": "A", "target_channels": [], "enabled": True}])
+    client = webui.create_app(testing=True).test_client()
+    html = client.get("/?account=A&platform=../evil").get_data(as_text=True)
+    assert "🔑 Credentials" in html
+    assert 'ptab ptab-active" href="/?account=A&platform=youtube"' in html
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_saves_return_to_the_platform_tab_they_came_from(name, tmp_path, monkeypatch):
+    webui = WEBUI_MODULES[name]
+    _panel(tmp_path, monkeypatch, webui,
+           [{"name": "A", "target_channels": [], "enabled": True}])
+    client = webui.create_app(testing=True).test_client()
+    response = client.post(
+        "/api/social/save",
+        data={"account": "A", "platform": "bilibili", "bilibili_enabled": "true"},
+    )
+    assert "platform=bilibili" in response.headers["Location"]
+    # A brand-new account tab also stays on the platform it was added from.
+    response = client.post("/api/accounts/add", data={"platform": "tiktok"})
+    assert "platform=tiktok" in response.headers["Location"]
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_platform_tab_dot_reflects_connection(name, tmp_path, monkeypatch):
+    webui = WEBUI_MODULES[name]
+    _panel(
+        tmp_path, monkeypatch, webui,
+        [{"name": "A", "target_channels": [], "enabled": True,
+          "tiktok_enabled": True, "tiktok_open_id": "o", "tiktok_access_token": "t"}],
+    )
+    client = webui.create_app(testing=True).test_client()
+    html = client.get("/?account=A&platform=youtube").get_data(as_text=True)
+
+    def _tab_markup(platform: str) -> str:
+        # Each platform tab is one <a> element; take it up to its </a>.
+        start = html.index(f'href="/?account=A&platform={platform}"')
+        return html[start:html.index("</a>", start)]
+
+    # Configured TikTok gets the green dot; unconfigured Bilibili does not.
+    assert "var(--green)" in _tab_markup("tiktok")
+    assert "var(--muted)" in _tab_markup("bilibili")
