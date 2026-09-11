@@ -20,6 +20,7 @@ from .config import (
     CLIP_DURATION_SEC,
     MIN_CLIP_DURATION_SEC,
     MAX_CLIP_DURATION_SEC,
+    clamp_clip_duration,
     SELECTION_STRATEGY,
     FETCH_SCAN_LIMIT,
     YTDL_SOCKET_TIMEOUT_SEC,
@@ -506,7 +507,9 @@ class YouTubeFetcher:
         self._log_audio_tracks(info)
         return info
 
-    def extract_heatmap_and_select_window(self, video_url: str) -> Tuple[Dict[str, Any], float, float, float]:
+    def extract_heatmap_and_select_window(
+        self, video_url: str, clip_duration: Optional[float] = None
+    ) -> Tuple[Dict[str, Any], float, float, float]:
         """
         Extracts full video metadata including 'heatmap' (Most Replayed) data without downloading.
         Then picks the best 15-20s moment using the configured strategy:
@@ -527,7 +530,7 @@ class YouTubeFetcher:
         duration = float(info.get("duration") or 0.0)
 
         ranked, used_heatmap, used_audio = self._build_ranked_windows(
-            video_url, info, duration, count=1
+            video_url, info, duration, count=1, clip_duration=clip_duration
         )
         used_energy = used_audio  # compatibility alias: probe-based audio analysis
 
@@ -535,7 +538,9 @@ class YouTubeFetcher:
             # Last-resort fallback: classic audio-energy scan, then hook window.
             logger.warning("Combined ranking unavailable; falling back to hook window.")
             try:
-                win = self.select_window_by_audio_energy(video_url, duration)
+                win = self.select_window_by_audio_energy(
+                    video_url, duration, clip_duration=clip_duration
+                )
                 used_audio = True
                 used_energy = True
             except Exception as exc:
@@ -544,19 +549,21 @@ class YouTubeFetcher:
                     peak_time = min(45.0, max(15.0, duration * 0.15))
                 else:
                     peak_time = duration / 2.0
-                clip_duration = CLIP_DURATION_SEC
-                clip_start = max(0.0, peak_time - clip_duration / 2.0)
-                clip_end = clip_start + clip_duration
+                clip_len = self._clip_len(clip_duration)
+                clip_start = max(0.0, peak_time - clip_len / 2.0)
+                clip_end = clip_start + clip_len
                 if duration > 0 and clip_end > duration:
                     clip_end = duration
-                    clip_start = max(0.0, clip_end - clip_duration)
+                    clip_start = max(0.0, clip_end - clip_len)
                 win = {"start": clip_start, "end": clip_end, "score": 0.0}
 
         best = ranked[0] if ranked else win
         best_score = float(best.get("score") or 0.0)
         clip_start = float(best["start"])
         clip_end = float(best["end"])
-        clip_start, clip_end = self._finalize_window(clip_start, clip_end, duration)
+        clip_start, clip_end = self._finalize_window(
+            clip_start, clip_end, duration, clip_duration
+        )
         peak_time = (clip_start + clip_end) / 2.0
 
         logger.info(
@@ -590,17 +597,20 @@ class YouTubeFetcher:
     # ------------------------------------------------------------------
     # Window scoring helpers (heatmap + audio-energy)
     # ------------------------------------------------------------------
-    @staticmethod
-    def _best_window_from_heatmap(heatmap: List[Dict[str, Any]], duration: float) -> Dict[str, Any]:
-        """Finds the highest-average-engagement 15-20s window from YouTube's heatmap buckets."""
+    def _best_window_from_heatmap(
+        self, heatmap: List[Dict[str, Any]], duration: float,
+        clip_duration: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Finds the highest-average-engagement window from YouTube's heatmap buckets."""
+        clip_len = self._clip_len(clip_duration)
         best_win_score = -1.0
         best_win_center = 0.0
 
         for item in heatmap:
             t_mid = (item.get("start_time", 0.0) + item.get("end_time", 0.0)) / 2.0
-            half_win = CLIP_DURATION_SEC / 2.0
+            half_win = clip_len / 2.0
             win_start = max(0.0, t_mid - half_win)
-            win_end = win_start + CLIP_DURATION_SEC
+            win_end = win_start + clip_len
 
             in_win = [
                 h.get("value", 0.0) for h in heatmap
@@ -611,11 +621,11 @@ class YouTubeFetcher:
                 best_win_score = score
                 best_win_center = t_mid
 
-        clip_start = max(0.0, best_win_center - CLIP_DURATION_SEC / 2.0)
-        clip_end = clip_start + CLIP_DURATION_SEC
+        clip_start = max(0.0, best_win_center - clip_len / 2.0)
+        clip_end = clip_start + clip_len
         if duration > 0 and clip_end > duration:
             clip_end = duration
-            clip_start = max(0.0, clip_end - CLIP_DURATION_SEC)
+            clip_start = max(0.0, clip_end - clip_len)
 
         return {"start": clip_start, "end": clip_end, "score": best_win_score}
 
@@ -633,18 +643,21 @@ class YouTubeFetcher:
             return [0.5] * len(values)
         return [(float(v) - lo) / (hi - lo) for v in values]
 
-    @staticmethod
-    def _heatmap_candidates(heatmap: List[Dict[str, Any]], duration: float) -> List[Dict[str, Any]]:
-        """One 15-20s candidate window per heatmap bucket, scored by average bucket value."""
-        half = CLIP_DURATION_SEC / 2.0
+    def _heatmap_candidates(
+        self, heatmap: List[Dict[str, Any]], duration: float,
+        clip_duration: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """One candidate window per heatmap bucket, scored by average bucket value."""
+        clip_len = self._clip_len(clip_duration)
+        half = clip_len / 2.0
         candidates: List[Dict[str, Any]] = []
         for item in heatmap:
             t_mid = (item.get("start_time", 0.0) + item.get("end_time", 0.0)) / 2.0
             start = max(0.0, t_mid - half)
-            end = start + CLIP_DURATION_SEC
+            end = start + clip_len
             if duration > 0 and end > duration:
                 end = duration
-                start = max(0.0, end - CLIP_DURATION_SEC)
+                start = max(0.0, end - clip_len)
             in_win = [
                 h.get("value", 0.0)
                 for h in heatmap
@@ -664,18 +677,20 @@ class YouTubeFetcher:
         return candidates
 
     def _audio_candidates(
-        self, probes: List[Dict[str, Any]], duration: float
+        self, probes: List[Dict[str, Any]], duration: float,
+        clip_duration: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """Candidate windows for audio-only mode, centered on each audio probe."""
-        half = CLIP_DURATION_SEC / 2.0
+        clip_len = self._clip_len(clip_duration)
+        half = clip_len / 2.0
         candidates: List[Dict[str, Any]] = []
         for probe in probes:
             center = (probe["start"] + probe["end"]) / 2.0
             start = max(0.0, center - half)
-            end = start + CLIP_DURATION_SEC
+            end = start + clip_len
             if duration > 0 and end > duration:
                 end = duration
-                start = max(0.0, end - CLIP_DURATION_SEC)
+                start = max(0.0, end - clip_len)
             candidates.append(
                 {
                     "start": start,
@@ -702,20 +717,47 @@ class YouTubeFetcher:
         nearest = min(probes, key=lambda p: abs(((p["start"] + p["end"]) / 2.0) - center))
         return float(nearest.get("score") or 0.0)
 
+    def _clip_len(self, clip_duration: Optional[float] = None) -> float:
+        """Target clip length: the per-call override, else this fetcher's own
+        default, else the global CLIP_DURATION_SEC."""
+        for value in (clip_duration, getattr(self, "clip_duration", None)):
+            try:
+                if value is not None and float(value) > 0:
+                    return clamp_clip_duration(float(value))
+            except (TypeError, ValueError):
+                continue
+        return float(CLIP_DURATION_SEC)
+
     @staticmethod
-    def _finalize_window(start: float, end: float, duration: float) -> Tuple[float, float]:
-        """Clamp a window to [0, duration] and enforce 15-20s bounds."""
+    def _clip_bounds(target: float) -> Tuple[float, float]:
+        """Min/max window length for a target clip length.
+
+        The classic 15-20s band is kept for the default length so existing
+        behaviour is untouched; a custom length is honoured exactly (a user who
+        asks for 60s gets 60s, not 20s).
+        """
+        if abs(float(target) - float(CLIP_DURATION_SEC)) < 1e-9:
+            return float(MIN_CLIP_DURATION_SEC), float(MAX_CLIP_DURATION_SEC)
+        return float(target), float(target)
+
+    def _finalize_window(
+        self, start: float, end: float, duration: float,
+        clip_duration: Optional[float] = None,
+    ) -> Tuple[float, float]:
+        """Clamp a window to [0, duration] and enforce the clip-length bounds."""
+        target = self._clip_len(clip_duration)
+        min_len, max_len = self._clip_bounds(target)
         start = max(0.0, float(start))
         end = max(start, float(end))
         if duration > 0 and end > duration:
             end = duration
-            start = min(start, max(0.0, end - MAX_CLIP_DURATION_SEC))
-        if end - start < MIN_CLIP_DURATION_SEC and (duration <= 0 or duration >= MIN_CLIP_DURATION_SEC):
-            if duration > 0 and start + MIN_CLIP_DURATION_SEC > duration:
-                start = max(0.0, duration - MIN_CLIP_DURATION_SEC)
-            end = min(end + (MIN_CLIP_DURATION_SEC - (end - start)), duration if duration > 0 else end + MIN_CLIP_DURATION_SEC)
-        if end - start > MAX_CLIP_DURATION_SEC:
-            end = start + MAX_CLIP_DURATION_SEC
+            start = min(start, max(0.0, end - max_len))
+        if end - start < min_len and (duration <= 0 or duration >= min_len):
+            if duration > 0 and start + min_len > duration:
+                start = max(0.0, duration - min_len)
+            end = min(end + (min_len - (end - start)), duration if duration > 0 else end + min_len)
+        if end - start > max_len:
+            end = start + max_len
         return start, end
 
     def _measure_audio_features(self, stream_url: str, start: float, dur: float) -> Dict[str, float]:
@@ -900,9 +942,10 @@ class YouTubeFetcher:
         info: Dict[str, Any],
         duration: float,
         count: Optional[int] = None,
+        clip_duration: Optional[float] = None,
     ) -> Tuple[List[Dict[str, Any]], bool, bool]:
         """
-        Rank candidate 15-20s windows using the configured strategy.
+        Rank candidate windows of the requested length using the configured strategy.
 
         Returns (windows, used_heatmap, used_audio). A window dict contains
         start/end, score, source, plus heatmap_score/audio_score when available.
@@ -930,18 +973,18 @@ class YouTubeFetcher:
         candidates: List[Dict[str, Any]] = []
         if strategy == "audio" and probes:
             logger.info("Audio-only mode: ranking windows by loud/high-pitched voice excitation...")
-            candidates = self._audio_candidates(probes, duration)
+            candidates = self._audio_candidates(probes, duration, clip_duration)
         elif heatmap:
             logger.info(
                 "Heatmap data found (%d buckets). Ranking top %d window(s) with strategy '%s'...",
                 len(heatmap), count, strategy,
             )
-            candidates = self._heatmap_candidates(heatmap, duration)
+            candidates = self._heatmap_candidates(heatmap, duration, clip_duration)
             if strategy == "audio" and not probes:
                 logger.warning("Audio requested but unavailable; ranking by Most Replayed instead.")
         elif probes:
             logger.info("No heatmap data. Ranking windows by audio excitement (voice/pitch/energy)...")
-            candidates = self._audio_candidates(probes, duration)
+            candidates = self._audio_candidates(probes, duration, clip_duration)
             strategy = "audio"
 
         if not candidates:
@@ -1034,7 +1077,10 @@ class YouTubeFetcher:
             return 0.0
         return float(np.sqrt(np.mean(samples ** 2)))
 
-    def select_window_by_audio_energy(self, video_url: str, duration: float) -> Dict[str, Any]:
+    def select_window_by_audio_energy(
+        self, video_url: str, duration: float,
+        clip_duration: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """
         Fallback for videos WITHOUT heatmap data (live stream VODs etc.).
         Samples audio energy across the whole video, finds the loudest/most
@@ -1057,7 +1103,7 @@ class YouTubeFetcher:
         if not stream_url:
             raise RuntimeError("No direct stream URL available")
 
-        sample_len = min(CLIP_DURATION_SEC, 20.0)
+        sample_len = self._clip_len(clip_duration)
         # Coarse pass: up to 40 evenly-spaced samples (keeps download tiny)
         n_samples = max(8, min(40, int(duration / max(30.0, sample_len * 2))))
         step = max(sample_len, (duration - sample_len) / max(1, n_samples - 1))
@@ -1094,8 +1140,9 @@ class YouTubeFetcher:
 
         clip_start = max(0.0, refined_t)
         clip_end = min(duration, clip_start + sample_len)
-        if clip_end - clip_start < MIN_CLIP_DURATION_SEC:
-            clip_end = min(duration, clip_start + MIN_CLIP_DURATION_SEC)
+        min_len = self._clip_bounds(self._clip_len(clip_duration))[0]
+        if clip_end - clip_start < min_len:
+            clip_end = min(duration, clip_start + min_len)
 
         logger.info(
             f"Audio-energy analysis complete: best window [{clip_start:.1f}s -> {clip_end:.1f}s] "
@@ -1103,7 +1150,10 @@ class YouTubeFetcher:
         )
         return {"start": clip_start, "end": clip_end, "score": refined_e}
 
-    def select_top_windows(self, video_url: str, count: int = 3) -> List[Dict[str, Any]]:
+    def select_top_windows(
+        self, video_url: str, count: int = 3,
+        clip_duration: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Returns the top `count` non-overlapping 15-20s windows for a video.
         Uses the configured strategy (combined heatmap + audio excitement, or
@@ -1114,7 +1164,7 @@ class YouTubeFetcher:
         self._ensure_not_live(info)
         duration = float(info.get("duration") or 0.0)
         ranked, _used_heatmap, _used_audio = self._build_ranked_windows(
-            video_url, info, duration, count=count
+            video_url, info, duration, count=count, clip_duration=clip_duration
         )
         if not ranked:
             raise RuntimeError("Could not rank any windows for this video")

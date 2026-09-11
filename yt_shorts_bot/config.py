@@ -64,6 +64,27 @@ HEATMAP_SMOOTH_WINDOW_SEC: float = float(os.getenv("HEATMAP_SMOOTH_WINDOW_SEC", 
 MIN_CLIP_DURATION_SEC: float = 15.0
 MAX_CLIP_DURATION_SEC: float = 20.0
 
+# Per-destination clip length (YouTube / TikTok / Bilibili can each differ).
+# Hard bounds for anything the control panel or accounts.json may request:
+# below ~5s there is nothing to watch, and 180s covers TikTok/Bilibili's long
+# formats. Note anything over 60s is no longer a YouTube Short and is uploaded
+# as a regular video.
+MIN_PLATFORM_CLIP_SEC: float = 5.0
+MAX_PLATFORM_CLIP_SEC: float = 180.0
+# Above this length YouTube no longer treats an upload as a Short.
+YOUTUBE_SHORT_MAX_SEC: float = 60.0
+
+
+def clamp_clip_duration(value, default: float = CLIP_DURATION_SEC) -> float:
+    """Coerce a user-supplied clip length into the supported range."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if seconds <= 0:
+        return float(default)
+    return max(MIN_PLATFORM_CLIP_SEC, min(MAX_PLATFORM_CLIP_SEC, seconds))
+
 # --- MOMENT SELECTION (most watched + high-pitch/high-energy voice) ---
 # How the bot picks the best 15-20s moment from a source video:
 #   "combined" = blend YouTube "Most Replayed" heatmap with audio excitement

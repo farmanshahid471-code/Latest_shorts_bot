@@ -39,6 +39,15 @@ from .pathutils import safe_account_slug
 from .processor import VideoProcessor
 from .runtime import pipeline_guard
 from .storage import CloudStorageManager
+from .platform_settings import (
+    PLATFORM_YOUTUBE,
+    SOCIAL_PLATFORMS,
+    clip_seconds_for,
+    platform_enabled,
+    platform_metadata,
+    platform_text_settings,
+    render_groups,
+)
 from .timewindows import (
     is_within_posting_window,
     posting_window_configured,
@@ -335,62 +344,97 @@ class ShortsBotScheduler:
                     # YouTube drips them public at the planned times.
                     if not spread and not self._wait_for_upload_gap(name, min_gap):
                         break
-                    if shorts_per_video > 1:
-                        ranked = fetcher.select_top_windows(
-                            video["url"], count=shorts_per_video
-                        )
-                        windows = [
-                            {"start": item["start"], "end": item["end"]}
-                            for item in ranked
+                    # Each distinct clip length gets its own moment selection
+                    # and render pass, so YouTube can post a 20s cut while
+                    # TikTok posts its own best 60s moment from the same video.
+                    groups = render_groups(account)
+                    info = None
+                    for pass_index, (clip_seconds, platforms) in enumerate(
+                        sorted(groups.items()), start=1
+                    ):
+                        if self.stop_event.is_set():
+                            break
+                        if len(groups) > 1:
+                            logger.info(
+                                "[%s] Render pass %d/%d: %.0fs clip for %s.",
+                                name,
+                                pass_index,
+                                len(groups),
+                                clip_seconds,
+                                ", ".join(platforms),
+                            )
+                        if shorts_per_video > 1:
+                            ranked = self._select_windows(
+                                fetcher, video["url"], shorts_per_video, clip_seconds
+                            )
+                            windows = [
+                                {"start": item["start"], "end": item["end"]}
+                                for item in ranked
+                            ]
+                            # Get complete metadata once for every part.
+                            pass_info, _peak, _start, _end = self._select_window(
+                                fetcher, video["url"], clip_seconds
+                            )
+                        else:
+                            pass_info, _peak, start, end = self._select_window(
+                                fetcher, video["url"], clip_seconds
+                            )
+                            windows = [{"start": start, "end": end}]
+                        info = info or pass_info
+                        # YouTube only uploads in the pass that owns it; the
+                        # other passes render solely for their social targets.
+                        pass_youtube = PLATFORM_YOUTUBE in platforms
+                        pass_socials = [
+                            item for item in platforms if item in SOCIAL_PLATFORMS
                         ]
-                        # Get complete metadata once for every part.
-                        info, _peak, _start, _end = fetcher.extract_heatmap_and_select_window(
-                            video["url"]
+                        pass_texts = platform_text_settings(
+                            account,
+                            PLATFORM_YOUTUBE if pass_youtube else pass_socials[0],
                         )
-                    else:
-                        info, _peak, start, end = fetcher.extract_heatmap_and_select_window(
-                            video["url"]
+                        uploaded_count += self._process_video_windows(
+                            video_id,
+                            video["url"],
+                            video["title"],
+                            channel_url,
+                            windows,
+                            part_suffix=(
+                                "" if pass_index == 1 else f"_{int(clip_seconds)}s"
+                            ),
+                            upload_to_youtube=pass_youtube,
+                            social_platforms=pass_socials,
+                            account=name,
+                            max_daily=max_daily,
+                            uploader=uploader,
+                            info=pass_info,
+                            aspect=aspect,
+                            fill=fill,
+                            logo_position=logo_position,
+                            like_subscribe=None if watermark_enabled is None else bool(watermark_enabled),
+                            like_subscribe_text=watermark_text,
+                            top_watermark_enabled=None if top_enabled is None else bool(top_enabled),
+                            top_watermark_text=top_text,
+                            extra_hashtags=pass_texts["extra_hashtags"],
+                            title_prefix=pass_texts["title_prefix"] or None,
+                            title_hashtags=pass_texts["title_hashtags"],
+                            custom_description=pass_texts["custom_description"],
+                            smart_titles=account.get("smart_titles"),
+                            delete_after_upload=bool(
+                                account.get("delete_after_upload", DELETE_AFTER_UPLOAD)
+                            ),
+                            delete_r2_after_upload=bool(
+                                account.get("delete_r2_after_upload", DELETE_R2_AFTER_UPLOAD)
+                            ),
+                            subtitles_enabled=subtitles_enabled,
+                            min_gap_minutes=0 if spread else min_gap,
+                            publish_time_fn=(
+                                (lambda: self._plan_publish_at(account, max_daily))
+                                if spread
+                                else None
+                            ),
+                            expected_channel=expected_channel,
+                            expected_channel_id=expected_channel_id,
+                            account_config=account,
                         )
-                        windows = [{"start": start, "end": end}]
-                    uploaded_count += self._process_video_windows(
-                        video_id,
-                        video["url"],
-                        video["title"],
-                        channel_url,
-                        windows,
-                        account=name,
-                        max_daily=max_daily,
-                        uploader=uploader,
-                        info=info,
-                        aspect=aspect,
-                        fill=fill,
-                        logo_position=logo_position,
-                        like_subscribe=None if watermark_enabled is None else bool(watermark_enabled),
-                        like_subscribe_text=watermark_text,
-                        top_watermark_enabled=None if top_enabled is None else bool(top_enabled),
-                        top_watermark_text=top_text,
-                        extra_hashtags=str(account.get("extra_hashtags") or "").strip(),
-                        title_prefix=account.get("title_prefix"),
-                        title_hashtags=str(account.get("title_hashtags") or "").strip(),
-                        custom_description=str(account.get("custom_description") or "").strip(),
-                        smart_titles=account.get("smart_titles"),
-                        delete_after_upload=bool(
-                            account.get("delete_after_upload", DELETE_AFTER_UPLOAD)
-                        ),
-                        delete_r2_after_upload=bool(
-                            account.get("delete_r2_after_upload", DELETE_R2_AFTER_UPLOAD)
-                        ),
-                        subtitles_enabled=subtitles_enabled,
-                        min_gap_minutes=0 if spread else min_gap,
-                        publish_time_fn=(
-                            (lambda: self._plan_publish_at(account, max_daily))
-                            if spread
-                            else None
-                        ),
-                        expected_channel=expected_channel,
-                        expected_channel_id=expected_channel_id,
-                        account_config=account,
-                    )
                     handled = True
                 except Exception as exc:
                     if is_age_restricted_source(exc):
@@ -596,6 +640,28 @@ class ShortsBotScheduler:
             UPLOAD_CHANNEL_MISMATCH: "CHANNEL_MISMATCH",
         }.get(result, "UPLOAD_FAILED")
 
+    @staticmethod
+    def _select_windows(fetcher, video_url: str, count: int, clip_seconds: float):
+        """``select_top_windows`` with the clip length, tolerating fetchers
+        that predate the per-platform length option."""
+        try:
+            return fetcher.select_top_windows(
+                video_url, count=count, clip_duration=clip_seconds
+            )
+        except TypeError:
+            return fetcher.select_top_windows(video_url, count=count)
+
+    @staticmethod
+    def _select_window(fetcher, video_url: str, clip_seconds: float):
+        """``extract_heatmap_and_select_window`` with the clip length,
+        tolerating fetchers that predate the per-platform length option."""
+        try:
+            return fetcher.extract_heatmap_and_select_window(
+                video_url, clip_duration=clip_seconds
+            )
+        except TypeError:
+            return fetcher.extract_heatmap_and_select_window(video_url)
+
     def _process_video_windows(
         self,
         video_id: str,
@@ -605,6 +671,9 @@ class ShortsBotScheduler:
         windows: list[dict],
         account: str = "",
         max_daily: int = 10,
+        part_suffix: str = "",
+        upload_to_youtube: bool = True,
+        social_platforms: Optional[list[str]] = None,
         uploader: Optional[YouTubeUploader] = None,
         info: Optional[dict] = None,
         aspect: Optional[str] = None,
@@ -643,6 +712,9 @@ class ShortsBotScheduler:
                 break
             start, end = float(window["start"]), float(window["end"])
             part_id = f"{video_id}_part{index}" if total > 1 else video_id
+            # A second render pass (different clip length) must get its own
+            # id, otherwise it looks already-processed and would be skipped.
+            part_id = f"{part_id}{part_suffix}"
             part_ids.append(part_id)
             if self.state_db.is_video_processed(part_id, account=account):
                 continue
@@ -770,6 +842,38 @@ class ShortsBotScheduler:
                     status="PENDING_UPLOAD",
                     account=account,
                 )
+                if not upload_to_youtube:
+                    # Social-only pass: this cut exists for TikTok/Bilibili, so
+                    # build the metadata without touching YouTube's quota.
+                    short_id = ""
+                    uploader.last_metadata = self._social_only_metadata(
+                        uploader, video_title, info, transcript_text,
+                        title_prefix, title_hashtags, extra_hashtags,
+                        custom_description, smart_title_enabled,
+                    )
+                    self.state_db.record_video_state(
+                        video_id=part_id,
+                        video_url=video_url,
+                        channel_id=channel_url,
+                        title=video_title,
+                        peak_time=(start + end) / 2.0,
+                        clip_start=start,
+                        clip_end=end,
+                        r2_key=uploaded_key or "",
+                        status="RENDERED_FOR_SOCIAL",
+                        account=account,
+                    )
+                    self._crosspost_to_social(
+                        account_config=account_config,
+                        account=account,
+                        video_id=part_id,
+                        video_path=processed_path,
+                        r2_key=uploaded_key,
+                        metadata=uploader.last_metadata,
+                        only_platforms=social_platforms,
+                    )
+                    continue
+
                 short_id = uploader.upload_short(
                     video_path=processed_path,
                     original_video_id=part_id,
@@ -833,6 +937,7 @@ class ShortsBotScheduler:
                     video_path=processed_path,
                     r2_key=uploaded_key,
                     metadata=uploader.last_metadata,
+                    only_platforms=social_platforms,
                 )
 
                 if is_real_upload_id(short_id):
@@ -935,6 +1040,40 @@ class ShortsBotScheduler:
             )
         return uploaded_count
 
+    @staticmethod
+    def _social_only_metadata(
+        uploader,
+        video_title: str,
+        info: Optional[dict],
+        transcript_text: str,
+        title_prefix: Optional[str],
+        title_hashtags: str,
+        extra_hashtags: str,
+        custom_description: str,
+        smart_titles: bool,
+    ) -> dict:
+        """Title/tags for a pass that renders only for social destinations.
+
+        Reuses the YouTube uploader's metadata builder (so captions look the
+        same everywhere) without performing an upload.
+        """
+        try:
+            return uploader.generate_short_metadata(
+                original_title=video_title,
+                info=info or {"title": video_title},
+                transcript_text=transcript_text,
+                extra_hashtags=extra_hashtags,
+                title_prefix=title_prefix,
+                title_hashtags=title_hashtags,
+                custom_description=custom_description,
+                smart_titles=smart_titles,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not build social metadata (%s); using the source title.", exc
+            )
+            return {"title": video_title, "tags": []}
+
     def _download_window(self, video_url: str, start: float, end: float) -> Path:
         return YouTubeFetcher().download_clip_section(video_url, start, end)
 
@@ -946,8 +1085,13 @@ class ShortsBotScheduler:
         video_path: Optional[Path],
         r2_key: Optional[str],
         metadata: Optional[dict],
+        only_platforms: Optional[list[str]] = None,
     ) -> dict:
-        """Post the finished Short to enabled TikTok accounts.
+        """Post the finished Short to the enabled social accounts.
+
+        ``only_platforms`` restricts the attempt to the destinations this
+        render pass was made for, so a 20s YouTube cut is never sent to a
+        TikTok account that asked for 60s.
 
         Never raises: a social failure is recorded in social_posts and the
         YouTube flow continues untouched.
@@ -959,7 +1103,12 @@ class ShortsBotScheduler:
 
             poster = SocialDestinations(state_db=self.state_db, storage=self.storage)
             return poster.crosspost(
-                account_config, video_id, video_path, r2_key, metadata or {}
+                account_config,
+                video_id,
+                video_path,
+                r2_key,
+                metadata or {},
+                only_platforms=only_platforms,
             )
         except Exception as exc:
             logger.warning("[%s] Social cross-post skipped: %s", account, exc)

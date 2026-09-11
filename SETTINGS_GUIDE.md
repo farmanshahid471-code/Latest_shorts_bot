@@ -248,6 +248,28 @@ per-account TikTok toggles and credentials, and `SETUP_BILIBILI.md` for the
 Bilibili ones (Bilibili always uploads the local file, so it never needs a
 public URL).
 
+### Per-platform overrides (`<platform>_<field>` in accounts.json)
+
+Each destination may override a few account-level settings. The keys are
+`youtube_`, `tiktok_` and `bilibili_` prefixed:
+
+```json
+{
+  "name": "Channel 1",
+  "title_prefix": "shared prefix",
+  "youtube_clip_seconds": 20,
+  "tiktok_clip_seconds": 60,
+  "tiktok_title_prefix": "TikTok only",
+  "bilibili_custom_description": "关注我"
+}
+```
+
+Overridable: `clip_seconds` (clip bot only), `title_prefix`, `title_hashtags`,
+`extra_hashtags`, `custom_description`. Resolution is per-platform value ->
+account-wide value -> built-in default, so an empty value means "inherit".
+`clip_seconds` is clamped to 5-180 seconds and each distinct length triggers its
+own moment selection and render pass.
+
 ### Authenticated source cookies (bot checks and eligible 18+ videos)
 
 The easiest setup is the control panel's **Age-restricted source access** box:

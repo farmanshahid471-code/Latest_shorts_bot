@@ -105,7 +105,8 @@ def test_is_enabled(name):
 
 def test_social_modules_are_mirrored():
     root = Path(__file__).resolve().parents[1]
-    for filename in ("social.py", "social_tiktok.py", "social_bilibili.py"):
+    for filename in ("social.py", "social_tiktok.py", "social_bilibili.py",
+                     "platform_settings.py"):
         clip = (root / "yt_shorts_bot" / filename).read_text(encoding="utf-8")
         repost = (root / "yt_shorts_repost_bot" / filename).read_text(encoding="utf-8")
         assert clip == repost, f"{filename} diverged between bots"
@@ -899,7 +900,8 @@ def test_clip_hook_fires_despite_youtube_result(tmp_path, monkeypatch, result, e
     monkeypatch.setattr(scheduler, "_download_window", lambda _u, _s, _e: raw)
     seen = {}
 
-    def fake_crosspost(self, account, video_id, video_path, r2_key=None, metadata=None):
+    def fake_crosspost(self, account, video_id, video_path, r2_key=None,
+                       metadata=None, only_platforms=None):
         seen.update(
             {
                 "account": account,
@@ -975,7 +977,8 @@ def test_repost_hook_fires_despite_youtube_result(tmp_path, monkeypatch):
     raw.write_bytes(b"raw")
     seen = {}
 
-    def fake_crosspost(self, account, video_id, video_path, r2_key=None, metadata=None):
+    def fake_crosspost(self, account, video_id, video_path, r2_key=None,
+                       metadata=None, only_platforms=None):
         seen.update({"video_id": video_id, "account": account})
         return {"tiktok": "POSTED"}
 

@@ -290,6 +290,21 @@ included in the storage-limit calculation. Automatic pruning only deletes bot
 objects under `shorts/` or `reposts/`; unrelated bucket objects are never deleted.
 If usage cannot be measured safely, backup upload is refused.
 
+## Per-platform settings & clip length
+
+Each platform tab in the control panel has its own settings card. A destination
+can override the **clip length**, **title prefix**, **title/extra hashtags** and
+**description**; leaving a field blank inherits the account-wide value from
+⚙️ Settings, so existing accounts behave exactly as before.
+
+Clip length is the interesting one: set YouTube to 20s and TikTok to 60s and the
+clip bot runs **one moment-selection + render pass per distinct length**, so each
+platform gets its own best moment at its own length rather than a truncated copy.
+Destinations that share a length share a single render. Lengths are clamped to
+5-180s; anything over 60s is no longer a YouTube Short and uploads as a regular
+video. Only `yt_shorts_bot` cuts clips, so clip length does not apply to the
+repost bot, which reposts whole Shorts.
+
 ## Cross-posting to TikTok & Bilibili
 
 Both bots can also post every finished Short to TikTok (official Content

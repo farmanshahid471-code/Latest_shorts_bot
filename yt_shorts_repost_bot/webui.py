@@ -44,6 +44,18 @@ from .pathutils import credential_path, relative_credential_value, safe_account_
 from .runtime import PIPELINE_LOCK
 from .timewindows import US_TIMEZONES, validate_posting_window
 from .social_bilibili import DEFAULT_TID as BILIBILI_DEFAULT_TID
+
+
+DEFAULT_CLIP_SECONDS = 0.0
+
+
+def clamp_clip_duration(value, default: float = 0.0) -> float:
+    """The repost bot reposts whole Shorts, so there is no clip length to
+    clamp; kept so both panels share one code path."""
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return float(default)
 from .social_tiktok import PRIVACY_LEVELS as TIKTOK_PRIVACY_LEVELS
 
 _jobs: dict = {}
@@ -379,11 +391,26 @@ def _finished_files() -> list:
 # Platform tabs: the top-level tab strip. Each one owns the connection UI for
 # that destination; the account sub-tabs below it stay the same everywhere.
 PLATFORMS = ("youtube", "tiktok", "bilibili")
+# Settings each platform can override; blank falls back to the account value.
+PLATFORM_TEXT_FIELDS = (
+    "title_prefix",
+    "title_hashtags",
+    "extra_hashtags",
+    "custom_description",
+)
 PLATFORM_LABELS = {
     "youtube": "▶️ YouTube",
     "tiktok": "🎵 TikTok",
     "bilibili": "📺 Bilibili",
 }
+
+
+# Every "<platform>_<field>" key, so account saves never drop them.
+_PLATFORM_OVERRIDE_KEYS = [
+    f"{_p}_{_f2}"
+    for _p in PLATFORMS
+    for _f2 in PLATFORM_TEXT_FIELDS + ("clip_seconds",)
+]
 
 
 def _clean_platform(value) -> str:
@@ -472,7 +499,8 @@ def _clean_account(acc: dict) -> dict:
                 "tiktok_privacy_level",
                 "bilibili_enabled", "bilibili_client_id", "bilibili_client_secret",
                 "bilibili_access_token", "bilibili_refresh_token", "bilibili_tid",
-                "bilibili_copyright", "bilibili_source"]:
+                "bilibili_copyright", "bilibili_source",
+                *_PLATFORM_OVERRIDE_KEYS]:
         if opt not in acc:
             continue
         val = acc[opt]
@@ -822,6 +850,49 @@ def create_app(testing: bool = False) -> Flask:
         return _redirect_msg("Auth started - a browser tab may open for login. Watch the logs.", account=redir_name)
 
     # ------------- CROSS-POSTING (TikTok + Bilibili) -------------
+    @app.post("/api/platform-settings/save")
+    def api_platform_settings_save():
+        """Per-destination overrides: clip length, title prefix, hashtags,
+        description. Blank means 'use the account-wide value'."""
+        name = (_f(request, "account") or "").strip()
+        if not _valid_account_name(name):
+            return _redirect_msg("Invalid account name.", ok=False)
+        platform = _clean_platform(_f(request, "platform"))
+        try:
+            data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8")) if ACCOUNTS_FILE.exists() else {}
+        except Exception:
+            data = {}
+        accounts = data.get("accounts", []) if isinstance(data, dict) else []
+        low = name.lower()
+        acc = next((a for a in accounts if str(a.get("name") or "").strip().lower() == low), None)
+        if acc is None:
+            acc = {"name": name, "target_channels": [], "max_daily_uploads": 10, "enabled": True}
+            accounts.append(acc)
+        for field in PLATFORM_TEXT_FIELDS:
+            key = f"{platform}_{field}"
+            if key in request.form or (request.is_json and key in (request.json or {})):
+                acc[key] = str(_f(request, key) or "").strip()
+        clip_key = f"{platform}_clip_seconds"
+        if clip_key in request.form or (request.is_json and clip_key in (request.json or {})):
+            raw = str(_f(request, clip_key) or "").strip()
+            if not raw:
+                # Empty = inherit the account-wide / global clip length.
+                acc.pop(clip_key, None)
+            else:
+                try:
+                    acc[clip_key] = float(clamp_clip_duration(raw))
+                except Exception:
+                    return _redirect_msg(
+                        "Clip length must be a number of seconds.",
+                        ok=False, account=name, platform=platform,
+                    )
+        _write_accounts(accounts)
+        logger.info("[webui] Saved %s settings for account '%s'.", platform, name)
+        return _redirect_msg(
+            f"{PLATFORM_LABELS.get(platform, platform)} settings saved for '{name}'.",
+            account=name, platform=platform,
+        )
+
     @app.post("/api/social/save")
     def api_social_save():
         name = (_f(request, "account") or "").strip()
@@ -1064,7 +1135,8 @@ def create_app(testing: bool = False) -> Flask:
                              "bilibili_enabled", "bilibili_client_id",
                              "bilibili_client_secret", "bilibili_access_token",
                              "bilibili_refresh_token", "bilibili_tid",
-                             "bilibili_copyright", "bilibili_source"]:
+                             "bilibili_copyright", "bilibili_source",
+                             *_PLATFORM_OVERRIDE_KEYS]:
                     if keep in old and keep not in acc:
                         acc[keep] = old[keep]
             accounts.append(acc)
@@ -1520,6 +1592,44 @@ def _render_page(msg: str = "", msg_type: str = "ok",
 
     log_lines = "".join(f"<div>{_esc(l)}</div>" for l in _tail_log(80))
 
+
+    # -------- per-platform settings (clip length + titles) for this tab -----
+    pset = {
+        field: str(loaded_acc.get(f"{platform}_{field}") or "")
+        for field in PLATFORM_TEXT_FIELDS
+    }
+    pset["clip_seconds"] = str(loaded_acc.get(f"{platform}_clip_seconds") or "")
+    pset["clip_placeholder"] = f"inherits {DEFAULT_CLIP_SECONDS:g}s"
+    clip_hint = (
+        "How long THIS platform's clip should be. Each length gets its own "
+        "moment selection and render, so YouTube can post 20s while TikTok "
+        "posts its own best 60s cut. Leave blank to use the shared length. "
+        "Over 60s is no longer a YouTube Short and uploads as a normal video."
+    )
+    platform_settings_card = f"""
+    <div class="card" style="margin-top:16px;">
+      <h2 style="font-size:14px;">🎛 {PLATFORM_LABELS[platform]} settings</h2>
+      <div class="hint">These apply to <b>{PLATFORM_LABELS[platform]} only</b>. Leave a field empty
+        to inherit the account-wide value from ⚙️ Settings below.</div>
+      <form action="/api/platform-settings/save" method="POST">
+        {csrf_input}
+        <input type="hidden" name="account" value="{_esc(loaded_account)}">
+        <input type="hidden" name="platform" value="{platform}">
+        <table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:6px;">
+          <tr><td style="padding:4px 0;width:38%;">Title prefix</td>
+              <td><input type="text" name="{platform}_title_prefix" value="{_esc(pset["title_prefix"])}" placeholder="inherits the shared prefix" style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">Title hashtags</td>
+              <td><input type="text" name="{platform}_title_hashtags" value="{_esc(pset["title_hashtags"])}" placeholder="inherits the shared hashtags" style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">Extra hashtags</td>
+              <td><input type="text" name="{platform}_extra_hashtags" value="{_esc(pset["extra_hashtags"])}" placeholder="inherits the shared hashtags" style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">Description</td>
+              <td><input type="text" name="{platform}_custom_description" value="{_esc(pset["custom_description"])}" placeholder="inherits the shared description" style="width:100%;"></td></tr>
+        </table>
+        <div class="row" style="margin-top:10px;"><button type="submit">Save {PLATFORM_LABELS[platform]} settings</button></div>
+      </form>
+    </div>
+    """
+
     youtube_card = f"""
     <div class="card" style="margin-top:16px;">
       <h2 style="font-size:14px;">🔑 Credentials</h2>
@@ -1582,7 +1692,7 @@ def _render_page(msg: str = "", msg_type: str = "ok",
         "youtube": youtube_card,
         "tiktok": tiktok_card,
         "bilibili": bilibili_card,
-    }[platform]
+    }[platform] + platform_settings_card
 
     html = f"""<!DOCTYPE html>
 <html lang="en">

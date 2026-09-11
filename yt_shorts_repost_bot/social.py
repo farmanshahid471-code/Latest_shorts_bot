@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 from .config import ACCOUNTS_FILE, DRY_RUN, logger
 from .models import StateDB
+from .platform_settings import platform_metadata
 from .social_bilibili import DESC_MAX_LEN as BILIBILI_DESC_MAX_LEN
 from .social_bilibili import BilibiliAPIError, BilibiliUploader
 from .social_tiktok import TITLE_MAX_LEN as TIKTOK_TITLE_MAX_LEN
@@ -144,25 +145,41 @@ class SocialDestinations:
         video_path: Optional[Path],
         r2_key: Optional[str] = None,
         metadata: Optional[dict] = None,
+        only_platforms: Optional[list[str]] = None,
     ) -> dict[str, str]:
-        """Post to every enabled destination; returns {destination: status}."""
+        """Post to every enabled destination; returns {destination: status}.
+
+        ``only_platforms`` restricts the attempt to those destinations, which
+        the scheduler uses so a clip rendered at one platform's clip length is
+        never posted to a platform that asked for a different length.
+        """
         results: dict[str, str] = {}
         if not account:
             return results
         name = str(account.get("name") or "").strip()
         if not name:
             return results
+        allowed = (
+            {str(item).strip().lower() for item in only_platforms}
+            if only_platforms is not None
+            else None
+        )
         for destination in (DEST_TIKTOK, DEST_BILIBILI):
             if not is_enabled(account, destination):
                 continue
+            if allowed is not None and destination not in allowed:
+                continue
+            # Each destination may override the title/hashtags for itself.
+            destination_metadata = platform_metadata(account, destination, metadata)
             try:
                 if destination == DEST_TIKTOK:
                     results[destination] = self._crosspost_tiktok(
-                        account, name, video_id, video_path, r2_key, metadata
+                        account, name, video_id, video_path, r2_key,
+                        destination_metadata,
                     )
                 else:
                     results[destination] = self._crosspost_bilibili(
-                        account, name, video_id, video_path, metadata
+                        account, name, video_id, video_path, destination_metadata
                     )
             except Exception as exc:
                 # A social failure must never break the YouTube pipeline.
@@ -380,11 +397,15 @@ def crosspost_short(
     metadata: Optional[dict] = None,
     state_db: Optional[StateDB] = None,
     dry_run: Optional[bool] = None,
+    only_platforms: Optional[list[str]] = None,
 ) -> dict[str, str]:
     """Convenience wrapper around SocialDestinations (never raises)."""
     try:
         poster = SocialDestinations(state_db=state_db, dry_run=dry_run)
-        return poster.crosspost(account, video_id, video_path, r2_key, metadata)
+        return poster.crosspost(
+            account, video_id, video_path, r2_key, metadata,
+            only_platforms=only_platforms,
+        )
     except Exception as exc:
         logger.warning("Social cross-post skipped: %s", exc)
         return {}

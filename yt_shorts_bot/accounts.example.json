@@ -44,6 +44,10 @@
       "bilibili_tid": 21,
       "bilibili_copyright": 1,
       "bilibili_source": "",
+      "youtube_clip_seconds": 20,
+      "tiktok_clip_seconds": 60,
+      "tiktok_title_prefix": "",
+      "bilibili_clip_seconds": 60,
       "enabled": true
     }
   ]
