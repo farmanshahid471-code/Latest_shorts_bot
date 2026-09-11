@@ -44,6 +44,7 @@ from .main import process_single_url
 from .pathutils import credential_path, relative_credential_value, safe_account_slug
 from .runtime import PIPELINE_LOCK
 from .timewindows import US_TIMEZONES, validate_posting_window
+from .social_bilibili import DEFAULT_TID as BILIBILI_DEFAULT_TID
 from .social_tiktok import PRIVACY_LEVELS as TIKTOK_PRIVACY_LEVELS
 
 _jobs: dict = {}
@@ -348,6 +349,9 @@ def _account_state(a: dict, db: StateDB) -> dict:
         "tiktok_open_id": a.get("tiktok_open_id", ""),
         "tiktok_has_token": bool(str(a.get("tiktok_access_token") or "").strip()),
         "tiktok_privacy_level": a.get("tiktok_privacy_level", ""),
+        "bilibili_enabled": a.get("bilibili_enabled", None),
+        "bilibili_client_id": a.get("bilibili_client_id", ""),
+        "bilibili_has_token": bool(str(a.get("bilibili_access_token") or "").strip()),
     }
 
 
@@ -450,14 +454,17 @@ def _clean_account(acc: dict) -> dict:
                 "subtitles_enabled", "expected_channel",
                 "tiktok_enabled", "tiktok_open_id", "tiktok_access_token",
                 "tiktok_refresh_token", "tiktok_client_key", "tiktok_client_secret",
-                "tiktok_privacy_level"]:
+                "tiktok_privacy_level",
+                "bilibili_enabled", "bilibili_client_id", "bilibili_client_secret",
+                "bilibili_access_token", "bilibili_refresh_token", "bilibili_tid",
+                "bilibili_copyright", "bilibili_source"]:
         if opt not in acc:
             continue
         val = acc[opt]
         if opt in ("watermark_enabled", "top_watermark_enabled", "smart_titles",
                    "delete_after_upload", "delete_r2_after_upload",
                    "subtitles_enabled", "spread_uploads_across_window",
-                   "tiktok_enabled",):
+                   "tiktok_enabled", "bilibili_enabled"):
             # accept real bools AND the strings "true"/"false"/"0"/"1"
             if isinstance(val, bool):
                 entry[opt] = val
@@ -794,7 +801,7 @@ def create_app(testing: bool = False) -> Flask:
         _spawn_job("test-youtube", _do)
         return _redirect_msg("Auth started - a browser tab may open for login. Watch the logs.", account=redir_name)
 
-    # ---------------- CROSS-POSTING (TikTok) ----------------
+    # ------------- CROSS-POSTING (TikTok + Bilibili) -------------
     @app.post("/api/social/save")
     def api_social_save():
         name = (_f(request, "account") or "").strip()
@@ -817,7 +824,7 @@ def create_app(testing: bool = False) -> Flask:
 
         # Enable toggles are presence-based, so saving any other settings form
         # can never silently switch cross-posting off.
-        for field in ("tiktok_enabled",):
+        for field in ("tiktok_enabled", "bilibili_enabled"):
             if _present(field):
                 raw = _f(request, field)
                 if isinstance(raw, bool):
@@ -825,13 +832,16 @@ def create_app(testing: bool = False) -> Flask:
                 else:
                     acc[field] = str(raw or "").strip().lower() in ("true", "on", "1", "yes")
         # Plain IDs: an empty value clears the field.
-        for field in ("tiktok_open_id", "tiktok_client_key"):
+        for field in ("tiktok_open_id", "tiktok_client_key",
+                      "bilibili_client_id", "bilibili_tid",
+                      "bilibili_copyright", "bilibili_source"):
             if _present(field):
                 acc[field] = str(_f(request, field) or "").strip()
         # Secrets: only overwrite when a non-empty value is submitted, so the
         # panel never needs to echo them back into the page to keep them.
         for field in ("tiktok_access_token", "tiktok_refresh_token",
-                      "tiktok_client_secret"):
+                      "tiktok_client_secret", "bilibili_access_token",
+                      "bilibili_refresh_token", "bilibili_client_secret"):
             if _present(field):
                 value = str(_f(request, field) or "").strip()
                 if value:
@@ -874,6 +884,34 @@ def create_app(testing: bool = False) -> Flask:
         return _redirect_msg("Testing TikTok - watch the logs.", account=target.get("name"))
 
     # ---------------- ACCOUNT SETTINGS (per-account) ----------------
+    @app.post("/api/test-bilibili")
+    def api_test_bilibili():
+        acc_name = (_f(request, "account") or "").strip()
+        acc = _find_account(acc_name) if acc_name else None
+        if acc is None:
+            return _redirect_msg("Choose the account tab to test first.", ok=False)
+        target = dict(acc)
+
+        def _do():
+            try:
+                from .social_bilibili import BilibiliUploader
+
+                ok, detail = BilibiliUploader(
+                    client_id=str(target.get("bilibili_client_id") or ""),
+                    client_secret=str(target.get("bilibili_client_secret") or ""),
+                    access_token=str(target.get("bilibili_access_token") or ""),
+                    refresh_token=str(target.get("bilibili_refresh_token") or ""),
+                ).check_connection()
+                if ok:
+                    logger.info("[webui] ✅ Bilibili check for '%s': %s", target.get("name"), detail)
+                else:
+                    logger.warning("[webui] ⚠️ Bilibili check for '%s' failed: %s", target.get("name"), detail)
+            except Exception as exc:
+                logger.error("[webui] Bilibili check error for '%s': %s", target.get("name"), exc)
+
+        _spawn_job("test-bilibili", _do)
+        return _redirect_msg("Testing Bilibili - watch the logs.", account=target.get("name"))
+
     @app.post("/api/account-settings/save")
     def api_account_settings_save():
         name = (_f(request, "account") or "default").strip()
@@ -1013,7 +1051,11 @@ def create_app(testing: bool = False) -> Flask:
                              "tiktok_enabled",
                              "tiktok_open_id", "tiktok_access_token",
                              "tiktok_refresh_token", "tiktok_client_key",
-                             "tiktok_client_secret", "tiktok_privacy_level"]:
+                             "tiktok_client_secret", "tiktok_privacy_level",
+                             "bilibili_enabled", "bilibili_client_id",
+                             "bilibili_client_secret", "bilibili_access_token",
+                             "bilibili_refresh_token", "bilibili_tid",
+                             "bilibili_copyright", "bilibili_source"]:
                     if keep in old and keep not in acc:
                         acc[keep] = old[keep]
             accounts.append(acc)
@@ -1209,7 +1251,7 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
 
     chk = lambda v: " checked" if v else ""
 
-    # -------- cross-posting (TikTok) for the active tab --------
+    # -------- cross-posting (TikTok + Bilibili) for the active tab --------
     # Secrets are NEVER echoed back: the form only shows whether one is saved,
     # and submitting a blank secret field keeps the stored value.
     soc = {
@@ -1220,7 +1262,21 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
         "tiktok_client_key": str(loaded_acc.get("tiktok_client_key") or ""),
         "tiktok_has_client_secret": bool(str(loaded_acc.get("tiktok_client_secret") or "").strip()),
         "tiktok_privacy_level": str(loaded_acc.get("tiktok_privacy_level") or "PUBLIC_TO_EVERYONE"),
+        "bilibili_enabled": bool(loaded_acc.get("bilibili_enabled")),
+        "bilibili_client_id": str(loaded_acc.get("bilibili_client_id") or ""),
+        "bilibili_has_client_secret": bool(str(loaded_acc.get("bilibili_client_secret") or "").strip()),
+        "bilibili_has_token": bool(str(loaded_acc.get("bilibili_access_token") or "").strip()),
+        "bilibili_has_refresh": bool(str(loaded_acc.get("bilibili_refresh_token") or "").strip()),
+        "bilibili_tid": str(loaded_acc.get("bilibili_tid") or BILIBILI_DEFAULT_TID),
+        "bilibili_copyright": str(loaded_acc.get("bilibili_copyright") or "1"),
+        "bilibili_source": str(loaded_acc.get("bilibili_source") or ""),
     }
+    if soc["bilibili_enabled"] and soc["bilibili_client_id"] and soc["bilibili_has_token"]:
+        bb_badge = '<span class="badge ok">Bilibili: on</span>'
+    elif soc["bilibili_enabled"]:
+        bb_badge = '<span class="badge warn">Bilibili: on but incomplete</span>'
+    else:
+        bb_badge = '<span class="badge">Bilibili: off</span>'
     if soc["tiktok_enabled"] and soc["tiktok_open_id"] and soc["tiktok_has_token"]:
         tt_badge = '<span class="badge ok">TikTok: on</span>'
     elif soc["tiktok_enabled"]:
@@ -1233,15 +1289,22 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
         for level in TIKTOK_PRIVACY_LEVELS
     )
 
+    copyright_options = "".join(
+        f'<option value="{value}"{" selected" if soc["bilibili_copyright"] == value else ""}>'
+        f"{label}</option>"
+        for value, label in (("1", "自制 / Original"), ("2", "转载 / Repost"))
+    )
+
     def _secret_hint(has_value: bool, empty_hint: str) -> str:
         return "saved ✓ (leave blank to keep)" if has_value else empty_hint
 
     social_card = f"""
     <div class="card" style="margin-top:16px;">
-      <h2 style="font-size:14px;">📣 Cross-post to TikTok {tt_badge}</h2>
+      <h2 style="font-size:14px;">📣 Cross-post to TikTok &amp; Bilibili {tt_badge} {bb_badge}</h2>
       <div class="hint">After each Short is rendered, the bot ALSO posts it here — even when the
-        YouTube upload waits on quota or fails. Uses the official TikTok API
-        (no password logins). Full setup steps: <b>SETUP_TIKTOK.md</b>.</div>
+        YouTube upload waits on quota or fails. Uses the official TikTok and
+        Bilibili APIs (no password logins). Full setup steps:
+        <b>SETUP_TIKTOK.md</b>, <b>SETUP_BILIBILI.md</b>.</div>
       <form action="/api/social/save" method="POST">
         <input type="hidden" name="account" value="{_esc(loaded_account)}">
         <table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:6px;">
@@ -1259,6 +1322,23 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
               <td><input type="password" name="tiktok_client_secret" value="" placeholder="{_secret_hint(soc["tiktok_has_client_secret"], "needed for auto-renewal")}" style="width:100%;" autocomplete="off"></td></tr>
           <tr><td style="padding:4px 0;">TikTok privacy</td>
               <td><select name="tiktok_privacy_level" style="width:100%;">{privacy_options}</select></td></tr>
+          <tr><td colspan="2" style="padding:10px 0 2px;"><b>Bilibili</b></td></tr>
+          <tr><td style="padding:4px 0;">Post to Bilibili</td>
+              <td><input type="checkbox" name="bilibili_enabled" value="true"{chk(soc["bilibili_enabled"])} style="transform:scale(1.3);"></td></tr>
+          <tr><td style="padding:4px 0;">Bilibili client id</td>
+              <td><input type="text" name="bilibili_client_id" value="{_esc(soc["bilibili_client_id"])}" style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">Bilibili client secret</td>
+              <td><input type="password" name="bilibili_client_secret" value="" placeholder="{_secret_hint(soc["bilibili_has_client_secret"], "app secret from the open platform")}" style="width:100%;" autocomplete="off"></td></tr>
+          <tr><td style="padding:4px 0;">Bilibili access token</td>
+              <td><input type="password" name="bilibili_access_token" value="" placeholder="{_secret_hint(soc["bilibili_has_token"], "paste an access token")}" style="width:100%;" autocomplete="off"></td></tr>
+          <tr><td style="padding:4px 0;">Bilibili refresh token (enables auto-renewal)</td>
+              <td><input type="password" name="bilibili_refresh_token" value="" placeholder="{_secret_hint(soc["bilibili_has_refresh"], "paste a refresh token")}" style="width:100%;" autocomplete="off"></td></tr>
+          <tr><td style="padding:4px 0;">Bilibili 分区 tid (category)</td>
+              <td><input type="text" name="bilibili_tid" value="{_esc(soc["bilibili_tid"])}" placeholder="21 = 日常" style="width:100%;"></td></tr>
+          <tr><td style="padding:4px 0;">Bilibili copyright</td>
+              <td><select name="bilibili_copyright" style="width:100%;">{copyright_options}</select></td></tr>
+          <tr><td style="padding:4px 0;">Repost source (转载 only)</td>
+              <td><input type="text" name="bilibili_source" value="{_esc(soc["bilibili_source"])}" placeholder="original video URL" style="width:100%;"></td></tr>
         </table>
         <div class="row" style="margin-top:10px;"><button type="submit">Save cross-posting</button></div>
       </form>
@@ -1267,10 +1347,15 @@ def _render_page(msg: str = "", msg_type: str = "ok", loaded_account: Optional[s
           <input type="hidden" name="account" value="{_esc(loaded_account)}">
           <button class="green" type="submit">Test TikTok</button>
         </form>
+        <form action="/api/test-bilibili" method="POST" style="display:inline;">
+          <input type="hidden" name="account" value="{_esc(loaded_account)}">
+          <button class="green" type="submit">Test Bilibili</button>
+        </form>
       </div>
       <div class="hint" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:8px;">
         TikTok uploads the rendered file directly (a public R2 URL is used when available);
-        the refresh token + client key/secret renew its ~24h access token
+        Bilibili always uploads the local file and its archives go through review before
+        they appear. Both refresh tokens renew the short-lived access token
         automatically. Secrets live in the ignored accounts.json and are never shown back.
       </div>
     </div>

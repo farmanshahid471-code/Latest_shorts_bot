@@ -290,17 +290,22 @@ included in the storage-limit calculation. Automatic pruning only deletes bot
 objects under `shorts/` or `reposts/`; unrelated bucket objects are never deleted.
 If usage cannot be measured safely, backup upload is refused.
 
-## Cross-posting to TikTok
+## Cross-posting to TikTok & Bilibili
 
 Both bots can also post every finished Short to TikTok (official Content
-Posting API). Each account tab opts in separately in the control panel's
-**📣 Cross-post to TikTok** section, with per-account credentials and a
-**Test TikTok** button. Cross-posting runs after each render and is independent
-of the YouTube result: a YouTube quota wait or failed upload never blocks the
+Posting API) and Bilibili (official Open Platform 稿件投递 API). Each account
+tab opts in per platform in the control panel's **📣 Cross-post to TikTok &
+Bilibili** section, with per-account credentials and **Test TikTok / Test
+Bilibili** buttons. Cross-posting runs after each render and is independent of
+the YouTube result: a YouTube quota wait or failed upload never blocks the
 social post. Attempts are tracked in a `social_posts` table so retries never
-publish twice. TikTok uploads the rendered file directly (a public
-`R2_PUBLIC_BASE_URL` is used when configured). Full setup:
-[SETUP_TIKTOK.md](SETUP_TIKTOK.md).
+publish twice.
+
+TikTok uploads the rendered file directly (a public `R2_PUBLIC_BASE_URL` is
+used when configured). Bilibili always uploads the local file — small clips in
+one shot, larger ones in 8 MB chunks — and its archives enter a review queue
+before going public. Full setup: [SETUP_TIKTOK.md](SETUP_TIKTOK.md),
+[SETUP_BILIBILI.md](SETUP_BILIBILI.md).
 
 ## CLI
 

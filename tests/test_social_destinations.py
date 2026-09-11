@@ -1,4 +1,4 @@
-"""TikTok cross-posting: captions, uploader, idempotency, panel."""
+"""TikTok + Bilibili cross-posting: captions, uploaders, idempotency, panel."""
 from __future__ import annotations
 
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import yt_shorts_bot.social as clip_social
+import yt_shorts_bot.social_bilibili as clip_bilibili
 import yt_shorts_bot.social_tiktok as clip_tiktok
 import yt_shorts_bot.webui as clip_webui
 import yt_shorts_repost_bot.social as repost_social
@@ -98,11 +99,13 @@ def test_is_enabled(name):
     assert not social.is_enabled({}, "tiktok")
     assert not social.is_enabled({"tiktok_enabled": False}, "tiktok")
     assert social.is_enabled({"tiktok_enabled": 1}, "tiktok")
+    assert not social.is_enabled({"tiktok_enabled": 1}, "bilibili")
+    assert social.is_enabled({"bilibili_enabled": True}, "bilibili")
 
 
 def test_social_modules_are_mirrored():
     root = Path(__file__).resolve().parents[1]
-    for filename in ("social.py", "social_tiktok.py"):
+    for filename in ("social.py", "social_tiktok.py", "social_bilibili.py"):
         clip = (root / "yt_shorts_bot" / filename).read_text(encoding="utf-8")
         repost = (root / "yt_shorts_repost_bot" / filename).read_text(encoding="utf-8")
         assert clip == repost, f"{filename} diverged between bots"
@@ -374,6 +377,308 @@ def test_crosspost_never_raises(name, tmp_path, monkeypatch):
     }
 
 
+# ---------------------------------------------------------------------------
+# Bilibili uploader (mocked HTTP)
+# ---------------------------------------------------------------------------
+class _BiliResponse:
+    def __init__(self, payload=None, status_code=200):
+        self._payload = payload if payload is not None else {"code": 0, "message": "0"}
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+
+def _bili_uploader(**kwargs):
+    defaults = dict(
+        client_id="cid",
+        client_secret="secret",
+        access_token="atok",
+        refresh_token="rtok",
+        dry_run=False,
+    )
+    defaults.update(kwargs)
+    return clip_bilibili.BilibiliUploader(**defaults)
+
+
+def test_bilibili_signature_is_deterministic_hmac():
+    uploader = _bili_uploader()
+    headers = uploader._signed_headers(b'{"a":1}', "application/json")
+    # Signed payload = the sorted x-bili-* headers joined by newlines.
+    signed = {k: v for k, v in headers.items() if k.startswith("x-bili-")}
+    payload = "\n".join(f"{k}:{signed[k]}" for k in sorted(signed))
+    import hashlib
+    import hmac as _hmac
+
+    expected = _hmac.new(b"secret", payload.encode(), hashlib.sha256).hexdigest()
+    assert headers["Authorization"] == expected
+    assert headers["x-bili-content-md5"] == hashlib.md5(b'{"a":1}').hexdigest()
+    assert headers["x-bili-signature-method"] == "HMAC-SHA256"
+    assert headers["access-token"] == "atok"
+
+
+def test_bilibili_check_connection_missing_config():
+    ok, detail = clip_bilibili.BilibiliUploader(dry_run=False).check_connection()
+    assert ok is False and "client id" in detail
+
+
+def test_bilibili_check_connection_ok(monkeypatch):
+    def _request(method, url, **kwargs):
+        assert url.endswith("/arcopen/fn/user/account/info")
+        return _BiliResponse({"code": 0, "data": {"name": "upzhu"}})
+
+    monkeypatch.setattr(clip_bilibili.requests, "request", _request)
+    ok, detail = _bili_uploader().check_connection()
+    assert ok is True and "upzhu" in detail
+
+
+def test_bilibili_small_file_uses_single_shot_upload(monkeypatch, tmp_path):
+    video = tmp_path / "short.mp4"
+    video.write_bytes(b"x" * 1024)
+    seen = {"posts": [], "submit": None}
+
+    def _request(method, url, **kwargs):
+        seen["posts"].append(url)
+        if url.endswith("/archive/video/init"):
+            # Small files must ask for the single-shot upload type.
+            assert b'"utype": "1"' in kwargs["data"]
+            return _BiliResponse({"code": 0, "data": {"upload_token": "utok"}})
+        if url.endswith("/video/v2/upload"):
+            assert kwargs["params"]["upload_token"] == "utok"
+            return _BiliResponse()
+        if url.endswith("/archive/add-by-utoken"):
+            seen["submit"] = json.loads(kwargs["data"].decode())
+            return _BiliResponse({"code": 0, "data": {"resource_id": "BV1xx"}})
+        raise AssertionError(f"unexpected call {method} {url}")
+
+    monkeypatch.setattr(clip_bilibili.requests, "request", _request)
+    monkeypatch.setattr(clip_bilibili.requests, "post", lambda url, **kw: _request("POST", url, **kw))
+    resource_id = _bili_uploader(tid=17).upload_video(
+        video, title="Hi", description="desc", tags=["a", "b"]
+    )
+    assert resource_id == "BV1xx"
+    assert seen["submit"]["tid"] == 17
+    assert seen["submit"]["tag"] == "a,b"
+    assert seen["submit"]["copyright"] == 1
+    # No merge call for the single-shot flow.
+    assert not any("video/complete" in u for u in seen["posts"])
+
+
+def test_bilibili_large_file_chunks_and_merges(monkeypatch, tmp_path):
+    monkeypatch.setattr(clip_bilibili, "SMALL_FILE_MAX_BYTES", 10)
+    monkeypatch.setattr(clip_bilibili, "CHUNK_SIZE", 4)
+    video = tmp_path / "big.mp4"
+    video.write_bytes(b"x" * 11)
+    parts, merged = [], []
+
+    def _request(method, url, **kwargs):
+        if url.endswith("/archive/video/init"):
+            assert b'"utype": "0"' in kwargs["data"]
+            return _BiliResponse({"code": 0, "data": {"upload_token": "utok"}})
+        if url.endswith("/part/upload"):
+            parts.append((kwargs["params"]["part_number"], len(kwargs["data"])))
+            return _BiliResponse()
+        if url.endswith("/archive/video/complete"):
+            merged.append(kwargs["params"]["upload_token"])
+            return _BiliResponse({"code": 0, "data": {}})
+        if url.endswith("/archive/add-by-utoken"):
+            return _BiliResponse({"code": 0, "data": {"resource_id": "BV2yy"}})
+        raise AssertionError(f"unexpected call {method} {url}")
+
+    monkeypatch.setattr(clip_bilibili.requests, "request", _request)
+    monkeypatch.setattr(clip_bilibili.requests, "post", lambda url, **kw: _request("POST", url, **kw))
+    assert _bili_uploader().upload_video(video, title="Big") == "BV2yy"
+    assert parts == [(1, 4), (2, 4), (3, 3)]
+    assert merged == ["utok"]
+
+
+def test_bilibili_expired_token_refreshes_and_retries(monkeypatch, tmp_path):
+    saved = {}
+    calls = {"n": 0}
+
+    def _request(method, url, **kwargs):
+        if url.endswith("/arcopen/fn/user/account/info"):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _BiliResponse({"code": 127001, "message": "token invalid"})
+            # The retry must carry the refreshed token.
+            assert kwargs["headers"]["access-token"] == "fresh-token"
+            return _BiliResponse({"code": 0, "data": {"name": "upzhu"}})
+        raise AssertionError(f"unexpected call {url}")
+
+    def _post(url, **kwargs):
+        assert url == clip_bilibili.OAUTH_URL
+        return _BiliResponse(
+            {"code": 0, "data": {"access_token": "fresh-token",
+                                 "refresh_token": "fresh-refresh"}}
+        )
+
+    monkeypatch.setattr(clip_bilibili.requests, "request", _request)
+    monkeypatch.setattr(clip_bilibili.requests, "post", _post)
+    uploader = _bili_uploader(
+        on_tokens_refreshed=lambda a, r, e: saved.update({"a": a, "r": r})
+    )
+    ok, _detail = uploader.check_connection()
+    assert ok is True
+    assert saved == {"a": "fresh-token", "r": "fresh-refresh"}
+
+
+def test_bilibili_api_error_raises(monkeypatch, tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    monkeypatch.setattr(
+        clip_bilibili.requests,
+        "request",
+        lambda *a, **k: _BiliResponse({"code": 127007, "message": "no permission"}),
+    )
+    with pytest.raises(clip_bilibili.BilibiliAPIError):
+        _bili_uploader().upload_video(video, title="Hi")
+
+
+def test_bilibili_dry_run_sends_nothing(monkeypatch, tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("dry-run must not touch the network")
+
+    monkeypatch.setattr(clip_bilibili.requests, "request", _boom)
+    assert _bili_uploader(dry_run=True).upload_video(video, title="Hi") == "dry-run"
+
+
+def test_bilibili_cover_failure_does_not_block_submit(monkeypatch, tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    cover = tmp_path / "c.jpg"
+    cover.write_bytes(b"img")
+
+    def _request(method, url, **kwargs):
+        if url.endswith("/archive/video/init"):
+            return _BiliResponse({"code": 0, "data": {"upload_token": "utok"}})
+        if url.endswith("/video/v2/upload"):
+            return _BiliResponse()
+        if url.endswith("/cover/upload"):
+            return _BiliResponse({"code": 4010, "message": "service error"})
+        if url.endswith("/archive/add-by-utoken"):
+            assert json.loads(kwargs["data"].decode())["cover"] == ""
+            return _BiliResponse({"code": 0, "data": {"resource_id": "BV3zz"}})
+        raise AssertionError(f"unexpected call {url}")
+
+    monkeypatch.setattr(clip_bilibili.requests, "request", _request)
+    monkeypatch.setattr(clip_bilibili.requests, "post", lambda url, **kw: _request("POST", url, **kw))
+    assert _bili_uploader().upload_video(video, title="Hi", cover_path=cover) == "BV3zz"
+
+
+def test_bilibili_tag_string_respects_limit():
+    assert clip_bilibili.build_tag_string(["#a", "a", "b c"]) == "a,b c"
+    long_tags = [f"tag{i:03d}" * 3 for i in range(50)]
+    assert len(clip_bilibili.build_tag_string(long_tags)) <= clip_bilibili.TAG_MAX_LEN
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_crosspost_bilibili_success_and_failure(name, tmp_path, monkeypatch):
+    social = SOCIAL_MODULES[name]
+    poster, db = _poster(name, tmp_path, monkeypatch)
+    video = tmp_path / f"{name}-bili.mp4"
+    video.write_bytes(b"data")
+    account = {"name": "A", "bilibili_enabled": True,
+               "bilibili_client_id": "cid", "bilibili_client_secret": "sec",
+               "bilibili_access_token": "tok"}
+    metadata = {"title": "Hi", "tags": ["x"]}
+
+    monkeypatch.setattr(
+        social.BilibiliUploader, "upload_video",
+        lambda self, path, **kwargs: "BV1abc",
+    )
+    assert poster.crosspost(account, "vid1", video, None, metadata) == {
+        "bilibili": social.SOCIAL_POSTED
+    }
+    assert db.get_social_post("vid1", "A", "bilibili")["remote_id"] == "BV1abc"
+
+    def _fail(self, path, **kwargs):
+        raise social.BilibiliAPIError("bilibili says no")
+
+    monkeypatch.setattr(social.BilibiliUploader, "upload_video", _fail)
+    assert poster.crosspost(account, "vid2", video, None, metadata) == {
+        "bilibili": social.SOCIAL_FAILED
+    }
+    row = db.get_social_post("vid2", "A", "bilibili")
+    assert row["status"] == social.SOCIAL_FAILED and "bilibili says no" in row["error_msg"]
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_crosspost_bilibili_needs_local_file(name, tmp_path, monkeypatch):
+    social = SOCIAL_MODULES[name]
+    poster, db = _poster(name, tmp_path, monkeypatch, public_url="https://cdn.example")
+    account = {"name": "A", "bilibili_enabled": True,
+               "bilibili_client_id": "cid", "bilibili_client_secret": "sec",
+               "bilibili_access_token": "tok"}
+    # An R2 URL is not enough: Bilibili has no pull-from-URL flow.
+    assert poster.crosspost(account, "vid1", None, "k.mp4", {}) == {
+        "bilibili": social.SOCIAL_SKIPPED
+    }
+    assert "file on disk" in db.get_social_post("vid1", "A", "bilibili")["error_msg"]
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_crosspost_bilibili_missing_credentials_skips(name, tmp_path, monkeypatch):
+    social = SOCIAL_MODULES[name]
+    poster, db = _poster(name, tmp_path, monkeypatch)
+    account = {"name": "A", "bilibili_enabled": True, "bilibili_client_id": "cid"}
+    assert poster.crosspost(account, "vid1", None, None, {}) == {
+        "bilibili": social.SOCIAL_SKIPPED
+    }
+    assert "missing" in db.get_social_post("vid1", "A", "bilibili")["error_msg"]
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_crosspost_bilibili_dry_run_and_idempotency(name, tmp_path, monkeypatch):
+    social = SOCIAL_MODULES[name]
+    poster, db = _poster(name, tmp_path, monkeypatch, dry_run=True)
+    account = {"name": "A", "bilibili_enabled": True,
+               "bilibili_client_id": "cid", "bilibili_client_secret": "sec",
+               "bilibili_access_token": "tok"}
+    assert poster.crosspost(account, "vid1", None, None, {}) == {
+        "bilibili": social.SOCIAL_DRY_RUN
+    }
+    live, db2 = _poster(name, tmp_path / "b", monkeypatch)
+    db2.record_social_post("vid9", "A", "bilibili", remote_id="BV0", status="POSTED")
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("already-posted must not touch the network")
+
+    monkeypatch.setattr(social.BilibiliUploader, "upload_video", _boom)
+    assert live.crosspost(account, "vid9", None, None, {}) == {
+        "bilibili": social.SOCIAL_ALREADY_POSTED
+    }
+
+
+@pytest.mark.parametrize("name", ["clip", "repost"])
+def test_crosspost_runs_both_destinations(name, tmp_path, monkeypatch):
+    """TikTok and Bilibili are attempted independently in the same pass."""
+    social = SOCIAL_MODULES[name]
+    poster, _db = _poster(name, tmp_path, monkeypatch)
+    video = tmp_path / f"{name}-both.mp4"
+    video.write_bytes(b"data")
+    account = {"name": "A",
+               "tiktok_enabled": True, "tiktok_open_id": "o", "tiktok_access_token": "t",
+               "bilibili_enabled": True, "bilibili_client_id": "cid",
+               "bilibili_client_secret": "sec", "bilibili_access_token": "tok"}
+
+    def _tt_fail(self, *_args, **_kwargs):
+        raise social.TikTokAPIError("tiktok down")
+
+    monkeypatch.setattr(social.TikTokUploader, "upload_video", _tt_fail)
+    monkeypatch.setattr(
+        social.BilibiliUploader, "upload_video", lambda self, path, **kw: "BV9"
+    )
+    # A TikTok failure must not stop the Bilibili post.
+    assert poster.crosspost(account, "vid1", video, None, {}) == {
+        "tiktok": social.SOCIAL_FAILED,
+        "bilibili": social.SOCIAL_POSTED,
+    }
+
+
 @pytest.mark.parametrize("name", ["clip", "repost"])
 def test_save_social_tokens_whitelists_keys(name, tmp_path, monkeypatch):
     social = SOCIAL_MODULES[name]
@@ -427,13 +732,23 @@ def test_social_save_endpoint(name, tmp_path, monkeypatch):
             "tiktok_open_id": "open1",
             "tiktok_access_token": "tttok",
             "tiktok_privacy_level": "SELF_ONLY",
+            "bilibili_enabled": "true",
+            "bilibili_client_id": "bcid",
+            "bilibili_client_secret": "bsec",
+            "bilibili_access_token": "btok",
+            "bilibili_tid": "17",
         },
     )
     assert response.status_code == 302
     saved = json.loads(accounts_file.read_text(encoding="utf-8"))["accounts"][0]
     assert saved["tiktok_enabled"] is True
     assert saved["tiktok_access_token"] == "tttok"
+    assert saved["bilibili_enabled"] is True
+    assert saved["bilibili_access_token"] == "btok"
     assert saved["tiktok_privacy_level"] == "SELF_ONLY"
+    assert saved["bilibili_enabled"] is True
+    assert saved["bilibili_client_secret"] == "bsec"
+    assert saved["bilibili_tid"] == "17"
 
     # Blank secrets keep the stored values; other forms never clear toggles.
     response = client.post(
@@ -445,6 +760,8 @@ def test_social_save_endpoint(name, tmp_path, monkeypatch):
     saved = json.loads(accounts_file.read_text(encoding="utf-8"))["accounts"][0]
     assert saved["tiktok_access_token"] == "tttok"
     assert saved["tiktok_enabled"] is True  # untouched by a partial save
+    assert saved["bilibili_access_token"] == "btok"  # blank secret keeps it
+    assert saved["bilibili_enabled"] is True
 
     # Invalid privacy levels are ignored.
     client.post(
@@ -474,11 +791,15 @@ def test_clean_account_preserves_social_fields(name):
             "target_channels": [],
             "tiktok_enabled": "on",
             "tiktok_open_id": "open1",
+            "bilibili_enabled": "true",
+            "bilibili_access_token": "btok",
             "tiktok_privacy_level": "bogus",
         }
     )
     assert cleaned["tiktok_enabled"] is True
     assert cleaned["tiktok_privacy_level"] == "PUBLIC_TO_EVERYONE"
+    assert cleaned["bilibili_enabled"] is True
+    assert cleaned["bilibili_access_token"] == "btok"
 
 
 @pytest.mark.parametrize("name", ["clip", "repost"])
@@ -487,7 +808,8 @@ def test_sources_save_keeps_social_credentials(name, tmp_path, monkeypatch):
     accounts_file = _panel(
         tmp_path, monkeypatch, webui,
         [{"name": "A", "target_channels": [], "enabled": True,
-          "tiktok_enabled": True, "tiktok_access_token": "tttok"}],
+          "tiktok_enabled": True, "tiktok_access_token": "tttok",
+          "bilibili_enabled": True, "bilibili_access_token": "btok"}],
     )
     client = webui.create_app(testing=True).test_client()
     response = client.post(
@@ -505,6 +827,8 @@ def test_sources_save_keeps_social_credentials(name, tmp_path, monkeypatch):
     saved = json.loads(accounts_file.read_text(encoding="utf-8"))["accounts"][0]
     assert saved["tiktok_enabled"] is True
     assert saved["tiktok_access_token"] == "tttok"
+    assert saved["bilibili_enabled"] is True
+    assert saved["bilibili_access_token"] == "btok"
 
 
 # ---------------------------------------------------------------------------

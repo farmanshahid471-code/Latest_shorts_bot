@@ -244,7 +244,9 @@ R2_PUBLIC_BASE_URL=""
 Blank credentials skip R2. Pruning only touches `shorts/` and `reposts/` keys.
 `R2_PUBLIC_BASE_URL` (e.g. `https://clips.example.com`) is optional: TikTok can
 pull the video from that public bucket URL. See `SETUP_TIKTOK.md` for the
-per-account TikTok toggles and credentials.
+per-account TikTok toggles and credentials, and `SETUP_BILIBILI.md` for the
+Bilibili ones (Bilibili always uploads the local file, so it never needs a
+public URL).
 
 ### Authenticated source cookies (bot checks and eligible 18+ videos)
 

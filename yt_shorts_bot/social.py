@@ -1,10 +1,10 @@
-"""Cross-post finished Shorts to TikTok.
+"""Cross-post finished Shorts to TikTok and Bilibili.
 
 Each destination account opts in independently via the control panel
-(``tiktok_enabled`` plus that platform's credentials).
+(``tiktok_enabled`` / ``bilibili_enabled`` plus that platform's credentials).
 Cross-posting runs AFTER a Short is rendered and is independent of the YouTube
 result: a YouTube quota wait, auth failure, or failed upload never blocks the
-TikTok post, and a failed social post never blocks YouTube.
+social post, and a failed social post never blocks YouTube.
 
 Idempotency: every attempt is recorded in the ``social_posts`` table, so a
 retry never publishes the same Short twice to the same platform. DRY_RUN mode
@@ -21,11 +21,14 @@ from typing import Any, Optional
 
 from .config import ACCOUNTS_FILE, DRY_RUN, logger
 from .models import StateDB
+from .social_bilibili import DESC_MAX_LEN as BILIBILI_DESC_MAX_LEN
+from .social_bilibili import BilibiliAPIError, BilibiliUploader
 from .social_tiktok import TITLE_MAX_LEN as TIKTOK_TITLE_MAX_LEN
 from .social_tiktok import TikTokAPIError, TikTokUploader
 from .storage import CloudStorageManager
 
 DEST_TIKTOK = "tiktok"
+DEST_BILIBILI = "bilibili"
 
 SOCIAL_POSTED = "POSTED"
 SOCIAL_FAILED = "FAILED"
@@ -35,6 +38,7 @@ SOCIAL_ALREADY_POSTED = "ALREADY_POSTED"
 
 _TOKEN_KEYS = {
     DEST_TIKTOK: ("tiktok_access_token", "tiktok_refresh_token"),
+    DEST_BILIBILI: ("bilibili_access_token", "bilibili_refresh_token"),
 }
 
 
@@ -44,6 +48,8 @@ def is_enabled(account: Optional[dict], destination: str) -> bool:
         return False
     if destination == DEST_TIKTOK:
         return bool(account.get("tiktok_enabled"))
+    if destination == DEST_BILIBILI:
+        return bool(account.get("bilibili_enabled"))
     return False
 
 
@@ -60,6 +66,10 @@ def build_social_caption(metadata: Optional[dict], destination: str) -> str:
     lowered_title = title.lower()
     fresh = [tag for tag in tags if tag.lower() not in lowered_title]
     tag_line = " ".join(f"#{tag}" for tag in fresh)
+    if destination == DEST_BILIBILI:
+        # Bilibili keeps the title and hashtags apart: tags travel in their own
+        # field, so the description only needs the readable title line.
+        return " ".join(f"{title} {tag_line}".split())[:BILIBILI_DESC_MAX_LEN]
     # TikTok titles are a single short line.
     return " ".join(f"{title} {tag_line}".split())[:TIKTOK_TITLE_MAX_LEN]
 
@@ -142,13 +152,18 @@ class SocialDestinations:
         name = str(account.get("name") or "").strip()
         if not name:
             return results
-        for destination in (DEST_TIKTOK,):
+        for destination in (DEST_TIKTOK, DEST_BILIBILI):
             if not is_enabled(account, destination):
                 continue
             try:
-                results[destination] = self._crosspost_tiktok(
-                    account, name, video_id, video_path, r2_key, metadata
-                )
+                if destination == DEST_TIKTOK:
+                    results[destination] = self._crosspost_tiktok(
+                        account, name, video_id, video_path, r2_key, metadata
+                    )
+                else:
+                    results[destination] = self._crosspost_bilibili(
+                        account, name, video_id, video_path, metadata
+                    )
             except Exception as exc:
                 # A social failure must never break the YouTube pipeline.
                 logger.warning(
@@ -273,6 +288,88 @@ class SocialDestinations:
         logger.info("[%s] TikTok video published (publish_id %s).", name, publish_id)
         self._record(video_id, name, DEST_TIKTOK, SOCIAL_POSTED, remote_id=publish_id)
         return SOCIAL_POSTED
+
+
+    # ------------------------------------------------------------------
+    def _crosspost_bilibili(
+        self,
+        account: dict,
+        name: str,
+        video_id: str,
+        video_path: Optional[Path],
+        metadata: Optional[dict],
+    ) -> str:
+        if self._already_posted(video_id, name, DEST_BILIBILI):
+            logger.info("[%s] Bilibili: already posted; skipping.", name)
+            return SOCIAL_ALREADY_POSTED
+        client_id = str(account.get("bilibili_client_id") or "").strip()
+        client_secret = str(account.get("bilibili_client_secret") or "").strip()
+        token = str(account.get("bilibili_access_token") or "").strip()
+        if not client_id or not client_secret or not token:
+            reason = ("Bilibili is enabled but the client id / secret / access "
+                      "token is missing.")
+            logger.warning("[%s] %s", name, reason)
+            self._record(video_id, name, DEST_BILIBILI, SOCIAL_SKIPPED, error_msg=reason)
+            return SOCIAL_SKIPPED
+        if self.dry_run:
+            logger.info("[%s] [DRY-RUN] Bilibili archive prepared but not submitted.", name)
+            self._record(video_id, name, DEST_BILIBILI, SOCIAL_DRY_RUN)
+            return SOCIAL_DRY_RUN
+        source = Path(video_path) if video_path else None
+        if not source or not source.is_file():
+            # Bilibili has no pull-from-URL flow: the bytes must exist locally.
+            reason = "Bilibili needs the rendered video file on disk."
+            logger.warning("[%s] %s", name, reason)
+            self._record(video_id, name, DEST_BILIBILI, SOCIAL_SKIPPED, error_msg=reason)
+            return SOCIAL_SKIPPED
+
+        def _on_tokens(new_access: str, new_refresh: str, _expires: Any) -> None:
+            save_social_tokens(
+                name,
+                DEST_BILIBILI,
+                {
+                    "bilibili_access_token": new_access,
+                    "bilibili_refresh_token": new_refresh,
+                },
+            )
+
+        uploader = BilibiliUploader(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=token,
+            refresh_token=str(account.get("bilibili_refresh_token") or ""),
+            tid=account.get("bilibili_tid"),
+            copyright_type=account.get("bilibili_copyright"),
+            source=str(account.get("bilibili_source") or ""),
+            dry_run=False,
+            on_tokens_refreshed=_on_tokens,
+        )
+        meta = metadata or {}
+        title = str(meta.get("title") or "").strip() or "New Short"
+        try:
+            resource_id = uploader.upload_video(
+                source,
+                title=title,
+                description=build_social_caption(meta, DEST_BILIBILI),
+                tags=meta.get("tags") or [],
+                cover_path=self._cover_path(meta),
+            )
+        except BilibiliAPIError as exc:
+            logger.warning("[%s] Bilibili post failed: %s", name, exc)
+            self._record(video_id, name, DEST_BILIBILI, SOCIAL_FAILED, error_msg=str(exc))
+            return SOCIAL_FAILED
+        logger.info("[%s] Bilibili archive submitted for review (%s).", name, resource_id)
+        self._record(video_id, name, DEST_BILIBILI, SOCIAL_POSTED, remote_id=resource_id)
+        return SOCIAL_POSTED
+
+    @staticmethod
+    def _cover_path(metadata: Optional[dict]) -> Optional[Path]:
+        """Thumbnail for the archive cover, when the pipeline produced one."""
+        raw = str((metadata or {}).get("thumbnail_path") or "").strip()
+        if not raw:
+            return None
+        candidate = Path(raw)
+        return candidate if candidate.is_file() else None
 
 
 def crosspost_short(

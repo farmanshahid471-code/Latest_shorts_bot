@@ -37,6 +37,14 @@
       "tiktok_client_key": "",
       "tiktok_client_secret": "",
       "tiktok_privacy_level": "PUBLIC_TO_EVERYONE",
+      "bilibili_enabled": false,
+      "bilibili_client_id": "",
+      "bilibili_client_secret": "",
+      "bilibili_access_token": "",
+      "bilibili_refresh_token": "",
+      "bilibili_tid": 21,
+      "bilibili_copyright": 1,
+      "bilibili_source": "",
       "enabled": true
     }
   ]
