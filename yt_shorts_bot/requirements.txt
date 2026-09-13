@@ -13,3 +13,6 @@ tqdm>=4.70,<5
 requests>=2.32,<3
 tabulate>=0.10,<1
 flask>=3.1,<4
+# Chinese dubbing for Bilibili (free, no API key).
+edge-tts>=7.0,<8
+deep-translator>=1.11,<2

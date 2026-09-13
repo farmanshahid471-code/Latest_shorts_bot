@@ -106,7 +106,8 @@ def test_is_enabled(name):
 def test_social_modules_are_mirrored():
     root = Path(__file__).resolve().parents[1]
     for filename in ("social.py", "social_tiktok.py", "social_bilibili.py",
-                     "platform_settings.py", "manual_export.py"):
+                     "platform_settings.py", "manual_export.py",
+                     "dubbing.py"):
         clip = (root / "yt_shorts_bot" / filename).read_text(encoding="utf-8")
         repost = (root / "yt_shorts_repost_bot" / filename).read_text(encoding="utf-8")
         assert clip == repost, f"{filename} diverged between bots"

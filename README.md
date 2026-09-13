@@ -290,6 +290,15 @@ included in the storage-limit calculation. Automatic pruning only deletes bot
 objects under `shorts/` or `reposts/`; unrelated bucket objects are never deleted.
 If usage cannot be measured safely, backup upload is refused.
 
+## Bilibili: Chinese dubbing
+
+Clips headed to Bilibili can be **dubbed into Chinese**: the bot translates the
+clip's transcript and speaks it with a Chinese TTS voice, timed line-by-line to
+the original subtitles, mixed over a ducked version of the source audio. Eight
+voices are available (Mandarin, Taiwanese, Cantonese). It is Bilibili-only —
+YouTube and TikTok keep the original audio — and best-effort, so a TTS failure
+still posts the clip undubbed. See `SETUP_BILIBILI.md`.
+
 ## Bilibili: manual export mode
 
 Bilibili's upload API is restricted to certified mainland-China enterprises, so

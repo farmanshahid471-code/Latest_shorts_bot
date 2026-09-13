@@ -623,6 +623,7 @@ class ShortsRepostScheduler:
                 video_path=final_path,
                 r2_key=uploaded_key,
                 metadata=metadata,
+                srt_path=self._transcript_for_dubbing(account_config, account, final_path),
             )
 
             if is_real_upload_id(short_id):
@@ -648,6 +649,51 @@ class ShortsRepostScheduler:
         finally:
             self.storage.cleanup_local_files(raw_path, final_path)
 
+    def _transcript_for_dubbing(
+        self,
+        account_config: Optional[dict],
+        account: str,
+        video_path: Optional[Path],
+    ) -> Optional[Path]:
+        """Transcribe a repost only when a Bilibili dub actually needs it.
+
+        The repost bot normally never transcribes (source Shorts already carry
+        their own captions), so the SRT dubbing relies on has to be produced
+        here, on demand.
+        """
+        from .social import bilibili_dub_enabled
+
+        if not bilibili_dub_enabled(account_config):
+            return None
+        source = Path(video_path) if video_path else None
+        if not source or not source.is_file():
+            return None
+        transcribe = getattr(self.processor, "transcribe_and_generate_srt", None)
+        if not callable(transcribe):
+            transcribe = getattr(
+                getattr(self.processor, "video_processor", None),
+                "transcribe_and_generate_srt",
+                None,
+            )
+        if not callable(transcribe):
+            logger.warning(
+                "[%s] Bilibili dubbing is on but this bot cannot transcribe; "
+                "posting the original audio.",
+                account,
+            )
+            return None
+        try:
+            generated = transcribe(source, srt_path=source.with_suffix(".srt"))
+        except Exception as exc:
+            logger.warning(
+                "[%s] Transcription for dubbing failed (%s); posting the "
+                "original audio.",
+                account, exc,
+            )
+            return None
+        result = Path(generated) if generated else None
+        return result if result and result.is_file() else None
+
     def _crosspost_to_social(
         self,
         account_config: Optional[dict],
@@ -656,6 +702,7 @@ class ShortsRepostScheduler:
         video_path: Optional[Path],
         r2_key: Optional[str],
         metadata: Optional[dict],
+        srt_path: Optional[Path] = None,
     ) -> dict:
         """Post the finished Short to enabled TikTok accounts.
 
@@ -668,9 +715,16 @@ class ShortsRepostScheduler:
             from .social import SocialDestinations
 
             poster = SocialDestinations(state_db=self.state_db, storage=self.storage)
-            return poster.crosspost(
-                account_config, video_id, video_path, r2_key, metadata or {}
-            )
+            try:
+                return poster.crosspost(
+                    account_config, video_id, video_path, r2_key, metadata or {},
+                    srt_path=srt_path,
+                )
+            except TypeError:
+                # Tolerate posters that predate the dubbing transcript arg.
+                return poster.crosspost(
+                    account_config, video_id, video_path, r2_key, metadata or {}
+                )
         except Exception as exc:
             logger.warning("[%s] Social cross-post skipped: %s", account, exc)
             return {}

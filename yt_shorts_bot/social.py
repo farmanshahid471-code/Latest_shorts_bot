@@ -48,6 +48,11 @@ def bilibili_is_manual(account: Optional[dict]) -> bool:
     return str((account or {}).get("bilibili_mode") or "").strip().lower() == "manual"
 
 
+def bilibili_dub_enabled(account: Optional[dict]) -> bool:
+    """True when clips bound for Bilibili should be dubbed into Chinese."""
+    return bool((account or {}).get("bilibili_dub_enabled"))
+
+
 def bilibili_export_dir(account: Optional[dict]) -> Path:
     """Folder for manual-mode exports (account override, else the default)."""
     custom = str((account or {}).get("bilibili_export_dir") or "").strip()
@@ -167,6 +172,7 @@ class SocialDestinations:
         r2_key: Optional[str] = None,
         metadata: Optional[dict] = None,
         only_platforms: Optional[list[str]] = None,
+        srt_path: Optional[Path] = None,
     ) -> dict[str, str]:
         """Post to every enabled destination; returns {destination: status}.
 
@@ -200,7 +206,8 @@ class SocialDestinations:
                     )
                 else:
                     results[destination] = self._crosspost_bilibili(
-                        account, name, video_id, video_path, destination_metadata
+                        account, name, video_id, video_path, destination_metadata,
+                        srt_path=srt_path,
                     )
             except Exception as exc:
                 # A social failure must never break the YouTube pipeline.
@@ -341,11 +348,15 @@ class SocialDestinations:
         video_id: str,
         video_path: Optional[Path],
         metadata: Optional[dict],
+        srt_path: Optional[Path] = None,
     ) -> str:
         if self._already_posted(video_id, name, DEST_BILIBILI):
             logger.info("[%s] Bilibili: already posted; skipping.", name)
             return SOCIAL_ALREADY_POSTED
-        if str(account.get("bilibili_mode") or "").strip().lower() == "manual":
+        # Chinese dubbing happens before EITHER mode consumes the file, so the
+        # manual export and the API upload both get the dubbed cut.
+        video_path = self._maybe_dub(account, name, video_path, srt_path)
+        if bilibili_is_manual(account):
             return self._export_bilibili(account, name, video_id, video_path, metadata)
         client_id = str(account.get("bilibili_client_id") or "").strip()
         client_secret = str(account.get("bilibili_client_secret") or "").strip()
@@ -406,6 +417,69 @@ class SocialDestinations:
         logger.info("[%s] Bilibili archive submitted for review (%s).", name, resource_id)
         self._record(video_id, name, DEST_BILIBILI, SOCIAL_POSTED, remote_id=resource_id)
         return SOCIAL_POSTED
+
+    # ------------------------------------------------------------------
+    def _maybe_dub(
+        self,
+        account: dict,
+        name: str,
+        video_path: Optional[Path],
+        srt_path: Optional[Path],
+    ) -> Optional[Path]:
+        """Return a Chinese-dubbed copy of the clip when the account asks.
+
+        Dubbing is best-effort: any failure logs a warning and falls back to
+        the original audio, because a missing dub is far better than a missing
+        post.
+        """
+        if not bilibili_dub_enabled(account):
+            return video_path
+        source = Path(video_path) if video_path else None
+        if not source or not source.is_file():
+            return video_path
+        if not srt_path or not Path(srt_path).is_file():
+            logger.warning(
+                "[%s] Bilibili dubbing is on but this clip has no transcript; "
+                "enable subtitles for the account so it gets transcribed. "
+                "Posting the original audio.",
+                name,
+            )
+            return video_path
+
+        from .dubbing import DEFAULT_VOICE, DubbingError, dub_video
+
+        voice = str(account.get("bilibili_dub_voice") or "").strip() or DEFAULT_VOICE
+        try:
+            original_volume = float(account.get("bilibili_dub_original_volume", 0.12))
+        except (TypeError, ValueError):
+            original_volume = 0.12
+        target = str(account.get("bilibili_dub_language") or "zh-CN").strip() or "zh-CN"
+        dubbed = source.with_name(f"{source.stem}_zh{source.suffix}")
+        try:
+            logger.info("[%s] Dubbing clip for Bilibili with voice %s...", name, voice)
+            dub_video(
+                source, Path(srt_path), dubbed,
+                voice=voice,
+                target_language=target,
+                original_volume=max(0.0, min(original_volume, 1.0)),
+            )
+        except DubbingError as exc:
+            logger.warning(
+                "[%s] Bilibili dubbing failed (%s); posting the original audio.",
+                name, exc,
+            )
+            return video_path
+        except Exception as exc:
+            logger.warning(
+                "[%s] Bilibili dubbing crashed (%s); posting the original audio.",
+                name, exc,
+            )
+            return video_path
+        if not dubbed.is_file() or dubbed.stat().st_size == 0:
+            logger.warning("[%s] Dub produced no file; posting the original audio.", name)
+            return video_path
+        logger.info("[%s] Bilibili clip dubbed: %s", name, dubbed.name)
+        return dubbed
 
     # ------------------------------------------------------------------
     def _export_bilibili(

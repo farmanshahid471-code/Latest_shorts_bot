@@ -61,6 +61,51 @@ Notes:
 - A fresh 非正式会员 account may submit only **5 archives/day**; pass the
   100-question quiz to become a 正式会员 and lift it.
 
+## 🎙 Dubbing clips into Chinese
+
+English audio rarely performs on Bilibili, so both bots can dub a clip before
+it is exported or uploaded. Tick **Dub into Chinese** in the Bilibili tab.
+
+How it works, per clip:
+
+1. The clip is transcribed with faster-whisper (the bot already does this for
+   subtitles, so the timed text is free).
+2. Each subtitle line is translated to Chinese.
+3. A Chinese TTS voice speaks each line, and each is placed **at its own
+   timestamp**, so the dub stays in sync with the picture.
+4. The dub is mixed over the original audio, which is ducked to a quiet bed
+   (set **Keep original audio under dub** to `0` to replace it entirely).
+
+Lines whose translation runs longer than their slot are sped up slightly (never
+more than 1.6x, past which the voice stops sounding human) instead of being
+allowed to overlap the next line.
+
+### Voices
+
+| Voice | Description |
+|---|---|
+| `zh-CN-XiaoxiaoNeural` | 晓晓 — female, warm (default) |
+| `zh-CN-YunxiNeural` | 云希 — male, lively |
+| `zh-CN-YunjianNeural` | 云健 — male, deep, sports style |
+| `zh-CN-XiaoyiNeural` | 晓伊 — female, youthful |
+| `zh-CN-YunyangNeural` | 云扬 — male, news anchor |
+| `zh-CN-liaoning-XiaobeiNeural` | 晓北 — female, northeastern accent |
+| `zh-TW-HsiaoChenNeural` | 曉臻 — female, Taiwanese Mandarin |
+| `zh-HK-HiuMaanNeural` | 曉曼 — female, Cantonese |
+
+### Notes
+
+- Dubbing is **Bilibili-only** — YouTube and TikTok keep the original audio.
+- It is **best-effort**: if TTS or translation fails, the clip is still posted
+  with its original audio and a warning is logged. A missing dub never costs
+  you the post.
+- It needs a transcript. The clip bot transcribes automatically when dubbing is
+  on; the repost bot transcribes on demand (it normally skips transcription).
+- Requires `edge-tts` and `deep-translator` (both free, no API key) plus
+  FFmpeg. Install with `pip install -r requirements.txt`.
+- Machine translation is not perfect. For a channel you care about, skim the
+  exported `.txt` and fix the title before uploading.
+
 ## Automatic mode (enterprise only)
 
 Everything below applies only to this mode. Like the other destinations it is:

@@ -40,6 +40,7 @@ from .processor import VideoProcessor
 from .runtime import pipeline_guard
 from .storage import CloudStorageManager
 from .platform_settings import (
+    PLATFORM_BILIBILI,
     PLATFORM_YOUTUBE,
     SOCIAL_PLATFORMS,
     clip_seconds_for,
@@ -48,6 +49,7 @@ from .platform_settings import (
     platform_text_settings,
     render_groups,
 )
+from .social import bilibili_dub_enabled
 from .timewindows import (
     is_within_posting_window,
     posting_window_configured,
@@ -759,7 +761,13 @@ class ShortsBotScheduler:
                     self.processor, "transcribe_and_generate_srt", None
                 )
                 probe_audio = getattr(self.processor, "_probe_has_audio", None)
-                if smart_title_enabled and callable(transcribe):
+                # Dubbing reuses the same transcript, so a Bilibili dub also
+                # forces transcription even when captions/smart titles are off.
+                needs_transcript = smart_title_enabled or (
+                    bilibili_dub_enabled(account_config)
+                    and PLATFORM_BILIBILI in (social_platforms or SOCIAL_PLATFORMS)
+                )
+                if needs_transcript and callable(transcribe):
                     has_audio = (
                         bool(probe_audio(raw_path))
                         if callable(probe_audio)
@@ -774,7 +782,7 @@ class ShortsBotScheduler:
                             if subtitles_enabled is not False:
                                 raise
                             logger.warning(
-                                "[%s] Smart-title transcription failed; using the "
+                                "[%s] Transcription failed; using the "
                                 "clean source title for this clip: %s",
                                 account,
                                 exc,
@@ -871,6 +879,7 @@ class ShortsBotScheduler:
                         r2_key=uploaded_key,
                         metadata=uploader.last_metadata,
                         only_platforms=social_platforms,
+                        srt_path=srt_path,
                     )
                     continue
 
@@ -938,6 +947,7 @@ class ShortsBotScheduler:
                     r2_key=uploaded_key,
                     metadata=uploader.last_metadata,
                     only_platforms=social_platforms,
+                    srt_path=srt_path,
                 )
 
                 if is_real_upload_id(short_id):
@@ -1086,6 +1096,7 @@ class ShortsBotScheduler:
         r2_key: Optional[str],
         metadata: Optional[dict],
         only_platforms: Optional[list[str]] = None,
+        srt_path: Optional[Path] = None,
     ) -> dict:
         """Post the finished Short to the enabled social accounts.
 
@@ -1102,14 +1113,26 @@ class ShortsBotScheduler:
             from .social import SocialDestinations
 
             poster = SocialDestinations(state_db=self.state_db, storage=self.storage)
-            return poster.crosspost(
-                account_config,
-                video_id,
-                video_path,
-                r2_key,
-                metadata or {},
-                only_platforms=only_platforms,
-            )
+            try:
+                return poster.crosspost(
+                    account_config,
+                    video_id,
+                    video_path,
+                    r2_key,
+                    metadata or {},
+                    only_platforms=only_platforms,
+                    srt_path=srt_path,
+                )
+            except TypeError:
+                # Tolerate posters that predate the dubbing transcript arg.
+                return poster.crosspost(
+                    account_config,
+                    video_id,
+                    video_path,
+                    r2_key,
+                    metadata or {},
+                    only_platforms=only_platforms,
+                )
         except Exception as exc:
             logger.warning("[%s] Social cross-post skipped: %s", account, exc)
             return {}

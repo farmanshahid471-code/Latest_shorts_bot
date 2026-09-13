@@ -36,6 +36,7 @@ from .config import (
     YOUTUBE_TOKEN_FILE, FFMPEG_PATH, KEEP_SHORTS_DIR, WEBUI_HOST, WEBUI_PORT,
     WEBUI_USERNAME, WEBUI_PASSWORD, WEBUI_SECRET_KEY, WEBUI_COOKIE_SECURE,
 )
+from .dubbing import CHINESE_VOICES, DEFAULT_VOICE as DUB_DEFAULT_VOICE
 from .models import StateDB
 from .storage import CloudStorageManager
 from .scheduler import ShortsRepostScheduler
@@ -501,6 +502,8 @@ def _clean_account(acc: dict) -> dict:
                 "bilibili_access_token", "bilibili_refresh_token", "bilibili_tid",
                 "bilibili_copyright", "bilibili_source",
                 "bilibili_mode", "bilibili_export_dir",
+                "bilibili_dub_enabled", "bilibili_dub_voice",
+                "bilibili_dub_language", "bilibili_dub_original_volume",
                 *_PLATFORM_OVERRIDE_KEYS]:
         if opt not in acc:
             continue
@@ -916,7 +919,7 @@ def create_app(testing: bool = False) -> Flask:
 
         # Enable toggles are presence-based, so saving any other settings form
         # can never silently switch cross-posting off.
-        for field in ("tiktok_enabled", "bilibili_enabled"):
+        for field in ("tiktok_enabled", "bilibili_enabled", "bilibili_dub_enabled"):
             if _present(field):
                 raw = _f(request, field)
                 if isinstance(raw, bool):
@@ -927,7 +930,9 @@ def create_app(testing: bool = False) -> Flask:
         for field in ("tiktok_open_id", "tiktok_client_key",
                       "bilibili_client_id", "bilibili_tid",
                       "bilibili_copyright", "bilibili_source",
-                      "bilibili_mode", "bilibili_export_dir"):
+                      "bilibili_mode", "bilibili_export_dir",
+                      "bilibili_dub_voice", "bilibili_dub_language",
+                      "bilibili_dub_original_volume"):
             if _present(field):
                 acc[field] = str(_f(request, field) or "").strip()
         # Secrets: only overwrite when a non-empty value is submitted, so the
@@ -1139,6 +1144,8 @@ def create_app(testing: bool = False) -> Flask:
                              "bilibili_refresh_token", "bilibili_tid",
                              "bilibili_copyright", "bilibili_source",
                              "bilibili_mode", "bilibili_export_dir",
+                             "bilibili_dub_enabled", "bilibili_dub_voice",
+                             "bilibili_dub_language", "bilibili_dub_original_volume",
                              *_PLATFORM_OVERRIDE_KEYS]:
                     if keep in old and keep not in acc:
                         acc[keep] = old[keep]
@@ -1361,6 +1368,10 @@ def _render_page(msg: str = "", msg_type: str = "ok",
         "bilibili_mode": (str(loaded_acc.get("bilibili_mode") or "manual").strip().lower()
                           or "manual"),
         "bilibili_export_dir": str(loaded_acc.get("bilibili_export_dir") or ""),
+        "bilibili_dub_enabled": bool(loaded_acc.get("bilibili_dub_enabled")),
+        "bilibili_dub_voice": str(loaded_acc.get("bilibili_dub_voice") or DUB_DEFAULT_VOICE),
+        "bilibili_dub_original_volume": str(
+            loaded_acc.get("bilibili_dub_original_volume", "0.12")),
     }
     if soc["bilibili_enabled"] and soc["bilibili_mode"] == "manual":
         bb_badge = '<span class="badge ok">Bilibili: manual export</span>'
@@ -1440,6 +1451,10 @@ def _render_page(msg: str = "", msg_type: str = "ok",
         )
     )
     _is_manual = soc["bilibili_mode"] == "manual"
+    _voice_opts = "".join(
+        f'<option value="{v}"{" selected" if soc["bilibili_dub_voice"] == v else ""}>{lbl}</option>'
+        for v, lbl in CHINESE_VOICES.items()
+    )
     _api_note = (
         '<div class="hint" style="margin-top:6px;">The API fields below are ignored in '
         'manual mode — leave them blank.</div>' if _is_manual else ""
@@ -1463,6 +1478,15 @@ def _render_page(msg: str = "", msg_type: str = "ok",
           <tr><td style="padding:4px 0;">Export folder (manual mode)</td>
               <td><input type="text" name="bilibili_export_dir" value="{_esc(soc["bilibili_export_dir"])}" placeholder="bilibili_manual" style="width:100%;">
                   <div class="hint">Relative paths sit next to accounts.json. One subfolder per channel.</div></td></tr>
+          <tr><td style="padding:4px 0;">🎙 Dub into Chinese</td>
+              <td><input type="checkbox" name="bilibili_dub_enabled" value="true"{chk(soc["bilibili_dub_enabled"])} style="transform:scale(1.3);">
+                  <div class="hint">Translates the clip's transcript and speaks it with a Chinese TTS voice,
+                  timed to the original subtitles. Needs subtitles/transcription available.</div></td></tr>
+          <tr><td style="padding:4px 0;">Dub voice</td>
+              <td><select name="bilibili_dub_voice" style="width:100%;">{_voice_opts}</select></td></tr>
+          <tr><td style="padding:4px 0;">Keep original audio under dub</td>
+              <td><input type="text" name="bilibili_dub_original_volume" value="{_esc(soc["bilibili_dub_original_volume"])}" placeholder="0.12" style="width:100%;">
+                  <div class="hint">0 = fully replace the original audio, 0.12 = quiet bed of music/ambience.</div></td></tr>
           <tr><td style="padding:4px 0;">Bilibili client id</td>
               <td><input type="text" name="bilibili_client_id" value="{_esc(soc["bilibili_client_id"])}" style="width:100%;"></td></tr>
           <tr><td style="padding:4px 0;">Bilibili client secret</td>
