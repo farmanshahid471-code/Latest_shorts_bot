@@ -60,3 +60,6 @@ _tests/f*.png
 Thumbs.db
 .sudo_as_admin_successful
 *.zip
+
+# Bilibili manual-upload exports
+**/bilibili_manual/

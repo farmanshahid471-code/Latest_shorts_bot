@@ -1,7 +1,69 @@
 # Cross-posting to Bilibili
 
-Both bots can automatically submit every finished Short to **Bilibili**
-(哔哩哔哩) — on top of YouTube and TikTok. Like the other destinations it is:
+Both bots can prepare every finished Short for **Bilibili** (哔哩哔哩) in one of
+two modes, chosen per account in the panel:
+
+| Mode | What happens | Needs |
+|---|---|---|
+| 📁 **Manual** (default) | The clip is saved to a folder with a matching `.txt` holding the title, description and tags. You upload it yourself. | Nothing |
+| 🔌 **Automatic** | The bot submits the archive through the Open Platform API. | Enterprise certification |
+
+## Manual mode (recommended for most people)
+
+Bilibili only grants upload API access to **certified mainland-China
+enterprises** — there is no individual developer path, and the application form
+demands a 统一社会信用代码 and a Chinese business license. Manual mode skips all
+of that: no account connection, no credentials, no ban risk.
+
+Set **Mode → Manual** in the Bilibili tab and optionally point **Export folder**
+somewhere convenient (relative paths sit next to `accounts.json`; the default is
+`bilibili_manual/`). After each cycle you get, per clip:
+
+```
+bilibili_manual/
+  My Channel/
+    2026-09-13_Funny-cat-moment_abc123.mp4   <- upload this
+    2026-09-13_Funny-cat-moment_abc123.txt   <- copy fields from this
+    2026-09-13_Funny-cat-moment_abc123.jpg   <- cover, when one was rendered
+```
+
+The `.txt` is plain UTF-8 and opens fine in Notepad:
+
+```
+TITLE
+Funny cat moment
+
+DESCRIPTION
+Funny cat moment #cats #funny
+
+TAGS (comma separated)
+cats, funny
+
+分区 / CATEGORY (TID)
+21
+
+COPYRIGHT
+转载 / Repost
+
+REPOST SOURCE
+https://youtube.com/watch?v=...
+```
+
+Notes:
+
+- Per-platform settings still apply, so a Bilibili-only clip length, title
+  prefix or description shows up in the exported file and its notes.
+- Exports are **idempotent** — a re-run logs `ALREADY_POSTED` rather than
+  writing the clip twice — and they never overwrite an existing file.
+- The video is **copied**, so the pipeline's normal cleanup still runs.
+- Declare **转载** with the source URL for reposted content. Misdeclaring
+  originality is a far more common cause of strikes than automation.
+- A fresh 非正式会员 account may submit only **5 archives/day**; pass the
+  100-question quiz to become a 正式会员 and lift it.
+
+## Automatic mode (enterprise only)
+
+Everything below applies only to this mode. Like the other destinations it is:
 
 - **Per account tab** — each channel opts in separately with its own Bilibili
   credentials.

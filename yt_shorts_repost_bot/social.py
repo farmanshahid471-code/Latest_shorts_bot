@@ -24,6 +24,7 @@ from .models import StateDB
 from .platform_settings import platform_metadata
 from .social_bilibili import DESC_MAX_LEN as BILIBILI_DESC_MAX_LEN
 from .social_bilibili import BilibiliAPIError, BilibiliUploader
+from .manual_export import export_for_manual_upload
 from .social_tiktok import TITLE_MAX_LEN as TIKTOK_TITLE_MAX_LEN
 from .social_tiktok import TikTokAPIError, TikTokUploader
 from .storage import CloudStorageManager
@@ -36,6 +37,26 @@ SOCIAL_FAILED = "FAILED"
 SOCIAL_SKIPPED = "SKIPPED"
 SOCIAL_DRY_RUN = "DRY_RUN_READY"
 SOCIAL_ALREADY_POSTED = "ALREADY_POSTED"
+SOCIAL_EXPORTED = "EXPORTED_FOR_MANUAL"
+
+# Where manual-mode clips land when the account does not override it.
+DEFAULT_BILIBILI_EXPORT_DIR = ACCOUNTS_FILE.parent / "bilibili_manual"
+
+
+def bilibili_is_manual(account: Optional[dict]) -> bool:
+    """True when Bilibili should export to disk instead of uploading."""
+    return str((account or {}).get("bilibili_mode") or "").strip().lower() == "manual"
+
+
+def bilibili_export_dir(account: Optional[dict]) -> Path:
+    """Folder for manual-mode exports (account override, else the default)."""
+    custom = str((account or {}).get("bilibili_export_dir") or "").strip()
+    if custom:
+        path = Path(custom).expanduser()
+        # Relative paths resolve next to accounts.json, matching the rest of
+        # the bot's path handling.
+        return path if path.is_absolute() else ACCOUNTS_FILE.parent / path
+    return DEFAULT_BILIBILI_EXPORT_DIR
 
 _TOKEN_KEYS = {
     DEST_TIKTOK: ("tiktok_access_token", "tiktok_refresh_token"),
@@ -213,7 +234,12 @@ class SocialDestinations:
             existing = self.state_db.get_social_post(video_id, name, destination)
         except Exception:
             return False
-        return bool(existing and existing.get("status") == SOCIAL_POSTED)
+        # A manual export counts as done too: re-running must not write the
+        # same clip into the export folder twice.
+        return bool(
+            existing
+            and existing.get("status") in (SOCIAL_POSTED, SOCIAL_EXPORTED)
+        )
 
     def _record(
         self,
@@ -319,6 +345,8 @@ class SocialDestinations:
         if self._already_posted(video_id, name, DEST_BILIBILI):
             logger.info("[%s] Bilibili: already posted; skipping.", name)
             return SOCIAL_ALREADY_POSTED
+        if str(account.get("bilibili_mode") or "").strip().lower() == "manual":
+            return self._export_bilibili(account, name, video_id, video_path, metadata)
         client_id = str(account.get("bilibili_client_id") or "").strip()
         client_secret = str(account.get("bilibili_client_secret") or "").strip()
         token = str(account.get("bilibili_access_token") or "").strip()
@@ -378,6 +406,66 @@ class SocialDestinations:
         logger.info("[%s] Bilibili archive submitted for review (%s).", name, resource_id)
         self._record(video_id, name, DEST_BILIBILI, SOCIAL_POSTED, remote_id=resource_id)
         return SOCIAL_POSTED
+
+    # ------------------------------------------------------------------
+    def _export_bilibili(
+        self,
+        account: dict,
+        name: str,
+        video_id: str,
+        video_path: Optional[Path],
+        metadata: Optional[dict],
+    ) -> str:
+        """Manual mode: save the clip + a notes file instead of uploading.
+
+        Bilibili only grants upload API access to certified mainland-China
+        enterprises, so many users upload by hand. The bot still does all the
+        work up to the upload itself.
+        """
+        source = Path(video_path) if video_path else None
+        if not source or not source.is_file():
+            reason = "Bilibili manual export needs the rendered video file on disk."
+            logger.warning("[%s] %s", name, reason)
+            self._record(video_id, name, DEST_BILIBILI, SOCIAL_SKIPPED, error_msg=reason)
+            return SOCIAL_SKIPPED
+
+        meta = dict(metadata or {})
+        # Bilibili keeps tags in their own field, so the description is the
+        # readable caption the same way the API path builds it.
+        meta.setdefault("description", build_social_caption(meta, DEST_BILIBILI))
+
+        copyright_type = str(account.get("bilibili_copyright") or "").strip()
+        extra = {
+            "分区 / category (tid)": account.get("bilibili_tid") or "",
+            "copyright": ("转载 / Repost" if copyright_type == "2" else "自制 / Original")
+            if copyright_type else "",
+            "repost source": account.get("bilibili_source") or "",
+        }
+        try:
+            exported_video, notes = export_for_manual_upload(
+                source,
+                Path(bilibili_export_dir(account)),
+                meta,
+                account_name=name,
+                video_id=video_id,
+                source_url=str(meta.get("source_url") or ""),
+                platform_label="Bilibili",
+                extra_fields=extra,
+            )
+        except Exception as exc:
+            logger.warning("[%s] Bilibili manual export failed: %s", name, exc)
+            self._record(video_id, name, DEST_BILIBILI, SOCIAL_FAILED, error_msg=str(exc))
+            return SOCIAL_FAILED
+
+        logger.info(
+            "[%s] Bilibili clip saved for manual upload: %s (details in %s)",
+            name, exported_video, notes.name,
+        )
+        self._record(
+            video_id, name, DEST_BILIBILI, SOCIAL_EXPORTED,
+            remote_id=exported_video.name,
+        )
+        return SOCIAL_EXPORTED
 
     @staticmethod
     def _cover_path(metadata: Optional[dict]) -> Optional[Path]:

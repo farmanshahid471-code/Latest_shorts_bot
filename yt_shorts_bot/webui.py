@@ -495,6 +495,7 @@ def _clean_account(acc: dict) -> dict:
                 "bilibili_enabled", "bilibili_client_id", "bilibili_client_secret",
                 "bilibili_access_token", "bilibili_refresh_token", "bilibili_tid",
                 "bilibili_copyright", "bilibili_source",
+                "bilibili_mode", "bilibili_export_dir",
                 *_PLATFORM_OVERRIDE_KEYS]:
         if opt not in acc:
             continue
@@ -920,7 +921,8 @@ def create_app(testing: bool = False) -> Flask:
         # Plain IDs: an empty value clears the field.
         for field in ("tiktok_open_id", "tiktok_client_key",
                       "bilibili_client_id", "bilibili_tid",
-                      "bilibili_copyright", "bilibili_source"):
+                      "bilibili_copyright", "bilibili_source",
+                      "bilibili_mode", "bilibili_export_dir"):
             if _present(field):
                 acc[field] = str(_f(request, field) or "").strip()
         # Secrets: only overwrite when a non-empty value is submitted, so the
@@ -1148,6 +1150,7 @@ def create_app(testing: bool = False) -> Flask:
                              "bilibili_client_secret", "bilibili_access_token",
                              "bilibili_refresh_token", "bilibili_tid",
                              "bilibili_copyright", "bilibili_source",
+                             "bilibili_mode", "bilibili_export_dir",
                              *_PLATFORM_OVERRIDE_KEYS]:
                     if keep in old and keep not in acc:
                         acc[keep] = old[keep]
@@ -1370,8 +1373,13 @@ def _render_page(msg: str = "", msg_type: str = "ok",
         "bilibili_tid": str(loaded_acc.get("bilibili_tid") or BILIBILI_DEFAULT_TID),
         "bilibili_copyright": str(loaded_acc.get("bilibili_copyright") or "1"),
         "bilibili_source": str(loaded_acc.get("bilibili_source") or ""),
+        "bilibili_mode": (str(loaded_acc.get("bilibili_mode") or "manual").strip().lower()
+                          or "manual"),
+        "bilibili_export_dir": str(loaded_acc.get("bilibili_export_dir") or ""),
     }
-    if soc["bilibili_enabled"] and soc["bilibili_client_id"] and soc["bilibili_has_token"]:
+    if soc["bilibili_enabled"] and soc["bilibili_mode"] == "manual":
+        bb_badge = '<span class="badge ok">Bilibili: manual export</span>'
+    elif soc["bilibili_enabled"] and soc["bilibili_client_id"] and soc["bilibili_has_token"]:
         bb_badge = '<span class="badge ok">Bilibili: on</span>'
     elif soc["bilibili_enabled"]:
         bb_badge = '<span class="badge warn">Bilibili: on but incomplete</span>'
@@ -1439,18 +1447,37 @@ def _render_page(msg: str = "", msg_type: str = "ok",
     </div>
     """
 
+    _mode_opts = "".join(
+        f'<option value="{v}"{" selected" if soc["bilibili_mode"] == v else ""}>{lbl}</option>'
+        for v, lbl in (
+            ("manual", "📁 Manual — save the file + a notes .txt, I upload myself"),
+            ("api", "🔌 Automatic — upload via the Open Platform API"),
+        )
+    )
+    _is_manual = soc["bilibili_mode"] == "manual"
+    _api_note = (
+        '<div class="hint" style="margin-top:6px;">The API fields below are ignored in '
+        'manual mode — leave them blank.</div>' if _is_manual else ""
+    )
+
     bilibili_card = f"""
     <div class="card" style="margin-top:16px;">
       <h2 style="font-size:14px;">📺 Post to Bilibili {bb_badge}</h2>
-      <div class="hint">After each Short is rendered, the bot ALSO submits it to Bilibili — even
-        when the YouTube upload waits on quota or fails. Uses the official Open Platform
-        API (no password logins). Full setup steps: <b>SETUP_BILIBILI.md</b>.</div>
+      <div class="hint">After each Short is rendered, the bot also prepares it for Bilibili — even
+        when the YouTube upload waits on quota or fails. <b>Manual mode</b> needs no account or
+        credentials: it saves the video plus a notes file you copy/paste from.
+        Full setup steps: <b>SETUP_BILIBILI.md</b>.</div>
       <form action="/api/social/save" method="POST">
         <input type="hidden" name="account" value="{_esc(loaded_account)}">
         <input type="hidden" name="platform" value="bilibili">
         <table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:6px;">
           <tr><td style="padding:4px 0;width:38%;">Post to Bilibili</td>
               <td><input type="checkbox" name="bilibili_enabled" value="true"{chk(soc["bilibili_enabled"])} style="transform:scale(1.3);"></td></tr>
+          <tr><td style="padding:4px 0;">Mode</td>
+              <td><select name="bilibili_mode" style="width:100%;">{_mode_opts}</select>{_api_note}</td></tr>
+          <tr><td style="padding:4px 0;">Export folder (manual mode)</td>
+              <td><input type="text" name="bilibili_export_dir" value="{_esc(soc["bilibili_export_dir"])}" placeholder="bilibili_manual" style="width:100%;">
+                  <div class="hint">Relative paths sit next to accounts.json. One subfolder per channel.</div></td></tr>
           <tr><td style="padding:4px 0;">Bilibili client id</td>
               <td><input type="text" name="bilibili_client_id" value="{_esc(soc["bilibili_client_id"])}" style="width:100%;"></td></tr>
           <tr><td style="padding:4px 0;">Bilibili client secret</td>
@@ -1475,8 +1502,9 @@ def _render_page(msg: str = "", msg_type: str = "ok",
         </form>
       </div>
       <div class="hint" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:8px;">
-        Bilibili always uploads the local file (there is no pull-from-URL flow), and every
-        archive goes through 审核 review before it appears publicly. The refresh token +
+        In manual mode nothing is sent anywhere: each clip is written to the export folder with a
+        matching .txt holding the title, description and tags to paste into the upload page.
+        In API mode every archive goes through 审核 review before it appears publicly. The refresh token +
         client id/secret renew the access token automatically. Secrets live in the ignored
         accounts.json and are never shown back.
       </div>
