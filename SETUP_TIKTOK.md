@@ -43,6 +43,42 @@ appears on the profile. It is simply invisible to everyone else.
 | Pass TikTok's audit | ✅ | The only way to publish publicly through the API. |
 | Post manually | ✅ | Use the bot's manual-export mode (like Bilibili) and upload by hand. |
 
+### Sandbox vs Production (important)
+
+Sandbox is **not** a lighter version of production — it is a separate, capped
+environment. TikTok's own sandbox docs state plainly:
+
+> *"Sandbox mode does not offer access to Content Posting API for public videos."*
+
+So a sandbox app can never post publicly, no matter how it is configured.
+Sandbox exists so you can build and test without waiting on review; the audit
+is a separate gate that only applies to the **Production** version of the app.
+
+### How to submit for audit
+
+1. In the developer portal, switch the app from **Sandbox** to **Production**
+   mode (top of the app page).
+2. Use **import sandbox configuration** to copy your tested sandbox setup into
+   the Production draft, so you do not re-enter scopes and URIs by hand.
+3. Verify **URL properties** for every URL in the app config (the *URL
+   properties* button). This is required before review.
+4. Make sure the app name, website URL and redirect URI all reference the
+   **same brand/domain** — a mismatch here is a very common rejection.
+5. Fill in the review submission: privacy policy URL, terms URL, a
+   data-handling description, and a **demo video** showing the complete flow
+   end to end (OAuth consent → upload → the resulting post) with every scope
+   you request performing a real action.
+6. Submit and wait. TikTok publishes no SLA; a clean first submission is
+   commonly reported at roughly 1-2 weeks, longer if it bounces.
+
+The demo video is often recorded **inside sandbox** — that is expected, and
+the forced-private visibility does not disqualify the recording.
+
+Remember the eligibility problem described above: TikTok's guidelines rule out
+apps that copy content from other platforms or that exist to manage your own
+accounts. Submitting costs only time, but do not build a schedule around
+approval.
+
 ### About the audit
 
 TikTok's Content Sharing Guidelines state the API is intended for *"authentic
