@@ -843,7 +843,21 @@ def create_app(testing: bool = False) -> Flask:
                         else:
                             logger.info("[webui] ⚠️ Connected, but no channel found on this Google account.")
                     except Exception as e:
-                        logger.info(f"[webui] ✅ YouTube auth OK (could not fetch channel name: {e})")
+                        # Auth worked, but the channel lookup failed. Quota is by
+                        # far the most common cause and needs its own guidance,
+                        # because the safety lock stays unset until this succeeds.
+                        if "quotaExceeded" in str(e) or "exceeded your" in str(e):
+                            logger.warning(
+                                "[webui] ✅ YouTube auth OK, but the channel name "
+                                "could not be read: the API quota for this Google "
+                                "Cloud project is exhausted. The channel safety "
+                                "lock is NOT set yet, so uploads stay blocked. "
+                                "Quota resets at midnight Pacific Time - press "
+                                "Test YouTube again after the reset, or set the "
+                                "account's 'Expected channel' manually to unblock."
+                            )
+                        else:
+                            logger.info(f"[webui] ✅ YouTube auth OK (could not fetch channel name: {e})")
                 else:
                     logger.warning(f"[webui] ⚠️ YouTube auth failed for '{acc_name or 'default'}'")
             except Exception as e:

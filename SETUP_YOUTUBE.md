@@ -106,6 +106,27 @@ Repeat Steps 1–7 in each Google account for each of your channels.
 - **Quota:** each Google account gets **10,000 API units/day** (~6–10 uploads). With one
   separate account per channel, **every channel gets its own quota** — that's how you reach
   5–10 uploads/day per channel across many channels.
+- **`quotaExceeded` when connecting a channel:** the log line
+  `✅ YouTube auth OK (could not fetch channel name: ... quotaExceeded)` means the
+  login itself **worked** — only the follow-up "which channel is this?" call was
+  refused, because that Google Cloud project has burned its 10,000 units for the
+  day. Two things to know:
+  - The **channel safety lock is not saved** when this happens, so uploads for that
+    tab stay blocked (`UPLOAD_CHANNEL_MISMATCH`) until the name is read once.
+  - Quota resets at **midnight Pacific Time**, not 24h after you hit it.
+
+  Fixes, in order of preference:
+  1. Wait for the reset and press **Connect / Test YouTube** again — the lock saves
+     itself and everything works.
+  2. Type the channel name into the account's **Expected channel** field manually
+     (⚙️ Settings) to set the lock without an API call.
+  3. If this keeps happening, the project is shared by too many channels. Give each
+     channel **its own Google Cloud project + OAuth client**, so each gets its own
+     10,000 units/day.
+
+  Note that a *failed* upload still costs ~1,600 units, so a few retries can drain a
+  project quickly — this is usually what exhausts the quota rather than the ~6 uploads
+  themselves.
 - **Keep the OAuth consent screen Published / In production.** Testing-mode refresh
   tokens last about 7 days. The panel now force-refreshes every runnable account and
   verifies its destination channel before **Start 24/7 Scheduler** succeeds; each
