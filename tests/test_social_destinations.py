@@ -1167,3 +1167,30 @@ def test_platform_tab_dot_reflects_connection(name, tmp_path, monkeypatch):
     # Configured TikTok gets the green dot; unconfigured Bilibili does not.
     assert "var(--green)" in _tab_markup("tiktok")
     assert "var(--muted)" in _tab_markup("bilibili")
+
+
+def test_unaudited_client_error_explains_both_fixes():
+    """TikTok's 403 for unaudited apps must explain how to move forward."""
+    import json as _json
+
+    from yt_shorts_bot.social_tiktok import TikTokAPIError, TikTokUploader
+
+    class _Response:
+        status_code = 403
+        text = _json.dumps({"error": {
+            "code": "unaudited_client_can_only_post_to_private_accounts",
+            "message": "Unaudited clients can only post to private account.",
+        }})
+
+        @staticmethod
+        def json():
+            return _json.loads(_Response.text)
+
+    with pytest.raises(TikTokAPIError) as excinfo:
+        TikTokUploader._parse_api_response(
+            "/v2/post/publish/content/init/", _Response())
+
+    message = str(excinfo.value)
+    # Both escape hatches must be spelled out, not just the raw API string.
+    assert "private" in message.lower()
+    assert "audit" in message.lower()

@@ -16,6 +16,44 @@ YouTube. Cross-posting is:
 Captions reuse the YouTube title + hashtags (TikTok titles are truncated to
 150 characters, its API limit).
 
+## ⚠️ Read this first: posts are PRIVATE until TikTok audits your app
+
+TikTok's own documentation is explicit: *"All content posted by unaudited
+clients will be restricted to private viewing mode."* This is the single
+biggest gotcha of the Content Posting API, and it is not something the bot can
+work around.
+
+Until your app passes TikTok's **audit**:
+
+- Every post is forced to `SELF_ONLY` — **visible only to the account owner**.
+  Not to followers, not on the For You page.
+- Only **5 users** can post through the app in a 24-hour window.
+- The target account must be **set to private** at the time of posting.
+  Posting to a public account fails with
+  `unaudited_client_can_only_post_to_private_accounts`.
+
+Nothing errors in the normal case — the API returns success and the video
+appears on the profile. It is simply invisible to everyone else.
+
+### Your options
+
+| Option | Public posts? | Notes |
+|---|---|---|
+| Stay unaudited | ❌ | Fine for testing the pipeline end to end. Each clip must then be made public by hand: open the video in TikTok → ⋯ → Privacy settings → *Everyone* (the account must be public first). |
+| Pass TikTok's audit | ✅ | The only way to publish publicly through the API. |
+| Post manually | ✅ | Use the bot's manual-export mode (like Bilibili) and upload by hand. |
+
+### About the audit
+
+TikTok's Content Sharing Guidelines state the API is intended for *"authentic
+creators posting original content"* and explicitly reject *"an app that copies
+arbitrary contents from other platforms to TikTok"* and *"a utility tool to
+help upload contents to the account(s) you or your team manages."*
+
+Be aware that a personal repost/clip bot is squarely in the category TikTok
+says it will not approve. Plan around staying private, or budget for manual
+uploading, rather than assuming the audit will clear.
+
 ## 1. TikTok (Content Posting API)
 
 TikTok needs a developer app + OAuth tokens. The bot uploads the video bytes
@@ -101,7 +139,8 @@ Open the account tab → **📣 Cross-post to TikTok**:
 | `TikTok authorization failed` | Paste a fresh access token, or fill in client key/secret + refresh token for auto-renewal. |
 | `TikTok privacy … not available` | The bot automatically falls back to an allowed level; adjust the panel setting to silence it. |
 | `Token belongs to a different TikTok user` | The tokens came from another TikTok login — redo step 1.2 with the right account. |
-| Posts stay private on TikTok | Normal for sandbox apps — submit the app for TikTok's audit. |
+| Posts stay private on TikTok | Expected: unaudited apps force `SELF_ONLY`. See the warning at the top. |
+| `unaudited_client_can_only_post_to_private_accounts` | The target account is public but the app is unaudited. Set the TikTok account to private, or pass the audit. |
 
 Never paste tokens into issues, commits, screenshots, or chat. `accounts.json`
 is already Git-ignored; the panel never echoes stored secrets back.

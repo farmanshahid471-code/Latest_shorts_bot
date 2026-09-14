@@ -292,6 +292,12 @@ If usage cannot be measured safely, backup upload is refused.
 
 ## Connecting a TikTok account
 
+> ⚠️ **TikTok posts are private until your app passes TikTok's audit.**
+> Unaudited apps force `SELF_ONLY` visibility, cap you at 5 users per 24h, and
+> require the target account to be private. See `SETUP_TIKTOK.md` before
+> relying on automated TikTok posting.
+
+
 Run `python connect_tiktok.py` once per TikTok account. It walks through
 TikTok's OAuth consent flow in your browser and writes the tokens into
 `accounts.json` for you. Your TikTok app needs

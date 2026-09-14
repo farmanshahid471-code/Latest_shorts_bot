@@ -112,6 +112,20 @@ class TikTokUploader:
                 code=code or "unauthorized",
                 status=response.status_code,
             )
+        if code == "unaudited_client_can_only_post_to_private_accounts":
+            # TikTok blocks the post outright when an unaudited app targets a
+            # PUBLIC account. Spell out both ways forward, because the raw
+            # message does not explain them.
+            raise TikTokAPIError(
+                "TikTok rejected the post: this app has not passed TikTok's "
+                "audit, so it can only post to accounts that are set to "
+                "PRIVATE. Either set the TikTok account to private in the "
+                "TikTok app (Settings > Privacy > Private account) and post "
+                "at SELF_ONLY, or submit the app for TikTok's audit to post "
+                "publicly. See SETUP_TIKTOK.md.",
+                code=code,
+                status=response.status_code,
+            )
         if response.status_code >= 400 or code.lower() != "ok":
             raise TikTokAPIError(
                 f"TikTok API error ({code or response.status_code}): "
@@ -284,6 +298,13 @@ class TikTokUploader:
                 options[0],
             )
             return options[0]
+        if self.privacy_level != PRIVACY_SELF and options == [PRIVACY_SELF]:
+            # Only SELF_ONLY on offer means the app has not been audited yet.
+            logger.warning(
+                "TikTok offers only SELF_ONLY for this creator: the app is "
+                "unaudited, so posts will be PRIVATE (visible to the account "
+                "owner only) until it passes TikTok's audit."
+            )
         return self.privacy_level
 
     def upload_video(
