@@ -109,24 +109,38 @@ Repeat Steps 1–7 in each Google account for each of your channels.
 - **`quotaExceeded` when connecting a channel:** the log line
   `✅ YouTube auth OK (could not fetch channel name: ... quotaExceeded)` means the
   login itself **worked** — only the follow-up "which channel is this?" call was
-  refused, because that Google Cloud project has burned its 10,000 units for the
-  day. Two things to know:
-  - The **channel safety lock is not saved** when this happens, so uploads for that
-    tab stay blocked (`UPLOAD_CHANNEL_MISMATCH`) until the name is read once.
-  - Quota resets at **midnight Pacific Time**, not 24h after you hit it.
+  refused. Note that call (`channels.list`) costs just **1 unit**, so if it fails
+  there are really only two possibilities:
 
-  Fixes, in order of preference:
-  1. Wait for the reset and press **Connect / Test YouTube** again — the lock saves
-     itself and everything works.
-  2. Type the channel name into the account's **Expected channel** field manually
-     (⚙️ Settings) to set the lock without an API call.
-  3. If this keeps happening, the project is shared by too many channels. Give each
-     channel **its own Google Cloud project + OAuth client**, so each gets its own
-     10,000 units/day.
+  **A. You genuinely used the quota today** (uploads cost ~1,600 units each, and
+  *failed* uploads cost the same). Wait for the reset at **midnight Pacific Time**
+  and press **Connect / Test YouTube** again.
 
-  Note that a *failed* upload still costs ~1,600 units, so a few retries can drain a
-  project quickly — this is usually what exhausts the quota rather than the ~6 uploads
-  themselves.
+  **B. Your project's quota has been set to 0 by Google.** This is the usual cause
+  when you have *not* used the bot recently. YouTube's Developer Terms let them
+  reduce or eliminate quota for API projects inactive for **90 consecutive days**,
+  and they also auto-adjust quota down to match your peak usage over the trailing
+  90 days. Either way an idle project can silently end up with 0 units/day, and
+  then even a 1-unit call fails immediately.
+
+  **Check which one it is:** open the Cloud Console →
+  **APIs & Services → YouTube Data API v3 → Quotas & System Limits**, and look at
+  *Queries per day*. If it reads **0**, it is case B. If it reads 10,000 with usage
+  against it, it is case A.
+
+  **Fixing case B:** the quota field is not editable back up, and quota-extension
+  requests take weeks. The practical fix that works for almost everyone is to
+  **create a fresh Google Cloud project**, enable YouTube Data API v3 on it, create
+  a new OAuth client, download the new `client_secret.json`, delete the account's
+  old `token.json`, and reconnect. A new project gets the default 10,000 units/day.
+
+  Keeping a project alive with even occasional use prevents the inactivity reset.
+
+  One side effect to know about: when this error happens the **channel safety lock
+  is not saved**, so uploads for that tab stay blocked (`UPLOAD_CHANNEL_MISMATCH`)
+  until the channel name is read once. You can also set it by hand by typing the
+  channel name into the account's **Expected channel** field in ⚙️ Settings.
+
 - **Keep the OAuth consent screen Published / In production.** Testing-mode refresh
   tokens last about 7 days. The panel now force-refreshes every runnable account and
   verifies its destination channel before **Start 24/7 Scheduler** succeeds; each

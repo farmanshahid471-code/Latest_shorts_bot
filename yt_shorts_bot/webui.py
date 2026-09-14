@@ -844,12 +844,18 @@ def create_app(testing: bool = False) -> Flask:
                         if "quotaExceeded" in str(e) or "exceeded your" in str(e):
                             logger.warning(
                                 "[webui] ✅ YouTube auth OK, but the channel name "
-                                "could not be read: the API quota for this Google "
-                                "Cloud project is exhausted. The channel safety "
-                                "lock is NOT set yet, so uploads stay blocked. "
-                                "Quota resets at midnight Pacific Time - press "
-                                "Test YouTube again after the reset, or set the "
-                                "account's 'Expected channel' manually to unblock."
+                                "could not be read: quotaExceeded. That call costs "
+                                "only 1 unit, so either today's quota is genuinely "
+                                "spent, or this Google Cloud project has been set "
+                                "to 0 units/day (Google does this to projects left "
+                                "idle ~90 days). Check Cloud Console > APIs & "
+                                "Services > YouTube Data API v3 > Quotas: if "
+                                "'Queries per day' is 0, create a NEW Cloud project "
+                                "and reconnect; otherwise wait for the reset at "
+                                "midnight Pacific Time. The channel safety lock is "
+                                "NOT set yet, so uploads stay blocked until this "
+                                "succeeds or you set 'Expected channel' by hand. "
+                                "See SETUP_YOUTUBE.md."
                             )
                         else:
                             logger.info(f"[webui] ✅ YouTube auth OK (could not fetch channel name: {e})")
