@@ -290,6 +290,14 @@ included in the storage-limit calculation. Automatic pruning only deletes bot
 objects under `shorts/` or `reposts/`; unrelated bucket objects are never deleted.
 If usage cannot be measured safely, backup upload is refused.
 
+## Connecting a TikTok account
+
+Run `python connect_tiktok.py` once per TikTok account. It walks through
+TikTok's OAuth consent flow in your browser and writes the tokens into
+`accounts.json` for you. Your TikTok app needs
+`http://127.0.0.1:8787/tiktok-callback` registered as a redirect URI.
+See `SETUP_TIKTOK.md`.
+
 ## Bilibili: Chinese dubbing
 
 Clips headed to Bilibili can be **dubbed into Chinese**: the bot translates the

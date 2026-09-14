@@ -35,7 +35,30 @@ automatically (new tokens are saved back to `accounts.json`).
 New apps start in **sandbox**: posts work but stay private until TikTok
 approves the app (submit for audit in the developer portal when ready).
 
-### 1.2 Authorize once to get tokens
+### 1.2 Authorize once (automatic — recommended)
+
+Run the helper from the project folder:
+
+```bash
+python connect_tiktok.py
+```
+
+It asks for your client key/secret and the panel tab name, opens TikTok's
+consent page, catches the redirect on a small local server, exchanges the code
+and writes `open_id` + both tokens straight into `accounts.json`. Nothing to
+copy by hand.
+
+Your TikTok app must list this exact redirect URI (Login Kit → Redirect URI):
+
+```
+http://127.0.0.1:8787/tiktok-callback
+```
+
+Repeat once per TikTok account, using a different tab name each time. Use
+`--bot repost` to set up the repost bot instead, and `--redirect-uri` if you
+registered a different localhost port.
+
+### 1.2b Authorize by hand (if you prefer)
 
 1. Open this URL (fill in your values, URL-encode the redirect):
    `https://www.tiktok.com/v2/auth/authorize/?client_key=CLIENT_KEY&response_type=code&scope=user.info.basic,video.upload,video.publish&redirect_uri=REDIRECT_URI&state=xyz`
