@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import threading
+
+import pytest
 from pathlib import Path
 
 
@@ -242,6 +244,9 @@ def test_clean_channel_tag_skips_generic_feed_suffixes():
 
 def test_sensitive_runtime_files_are_not_tracked():
     root = Path(__file__).resolve().parents[1]
+    if not (root / ".git").exists():
+        # Released zips ship without git metadata; there is nothing to check.
+        pytest.skip("not a git checkout")
     tracked = subprocess.run(
         ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True
     ).stdout.splitlines()
