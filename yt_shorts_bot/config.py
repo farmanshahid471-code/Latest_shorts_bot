@@ -6,8 +6,8 @@ import sys
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import List
-from dotenv import load_dotenv
+from typing import List, Optional
+from dotenv import find_dotenv, load_dotenv
 
 from .pathutils import credential_path
 
@@ -17,10 +17,114 @@ from .pathutils import credential_path
 # folder when the bot is launched from elsewhere (e.g. run_ui.bat). So we load
 # the .env next to this file explicitly.
 _ENV_FILE = Path(__file__).resolve().parent / ".env"
+
+
+def _first_env_file(start: Path, name: str) -> Optional[Path]:
+    """Return `name` inside `start` or the first parent folder that contains
+    it - the same upward search python-dotenv (load_dotenv/find_dotenv) and
+    Flask's app.run() -> cli.load_dotenv() perform when looking for env files."""
+    for directory in (start, *start.parents):
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _sanitize_env_file(path: Path) -> bool:
+    """Rewrite a .env/.flaskenv file that is not valid UTF-8 back to UTF-8.
+
+    python-dotenv and Flask (app.run -> cli.load_dotenv) read env files with
+    strict UTF-8, so a file saved as Windows "ANSI" (old Notepad default) - or
+    one containing a single pasted smart character such as an em dash (byte
+    0x97 in Windows-1252) - crashes the whole bot at startup with
+    UnicodeDecodeError. Such files are converted once, BEFORE anything reads
+    them; the untouched original is kept beside the file as <name>.badenc.bak.
+    Returns True if the file was repaired.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return False
+    if not raw:
+        return False
+    try:
+        raw.decode("utf-8")
+        return False  # already valid UTF-8 - nothing to do
+    except UnicodeDecodeError:
+        pass
+    # Windows-1252 first (what Notepad's "ANSI" writes; byte 0x97 = em dash),
+    # then latin-1, which can decode every possible byte.
+    try:
+        text, codec = raw.decode("cp1252"), "Windows-1252"
+    except UnicodeDecodeError:
+        text, codec = raw.decode("latin-1", errors="replace"), "Latin-1"
+    backup = path.with_name(path.name + ".badenc.bak")
+    try:
+        backup.write_bytes(raw)
+        path.write_bytes(text.encode("utf-8"))
+    except OSError as exc:
+        print(f"[WARN] Could not fix non-UTF-8 encoding of {path}: {exc}", file=sys.stderr)
+        return False
+    print(
+        f"[WARN] {path} was not valid UTF-8 (saved with a Windows/ANSI encoding "
+        f"or containing a character such as an em dash). It was rewritten as "
+        f"UTF-8 (decoded as {codec}); the original was saved as {backup}.",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _repair_env_files() -> None:
+    """Auto-repair every env file that will be opened during startup:
+    * this module reads _ENV_FILE, or the first .env walking up from this
+      folder when the local one is missing (load_dotenv fallback);
+    * Flask's app.run() reads the first .env AND the first .flaskenv walking
+      up from the current working directory (cli.load_dotenv uses
+      find_dotenv(..., usecwd=True), which is what used to crash the control
+      panel with UnicodeDecodeError on a non-UTF-8 .env).
+    Runs BEFORE the first read below."""
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        cwd = None
+    walks = [(_ENV_FILE.parent, ".env")]
+    if cwd is not None:
+        walks = [(cwd, ".env"), (cwd, ".flaskenv"), *walks]
+    seen = set()
+    for start, name in walks:
+        found = _first_env_file(start, name)
+        if found is None:
+            continue
+        key = os.path.normcase(str(found))
+        if key in seen:
+            continue
+        seen.add(key)
+        _sanitize_env_file(found)
+
+
+def _load_env(path: Path, **kwargs) -> None:
+    """load_dotenv() with an actionable error instead of a raw traceback if a
+    file somehow still is not readable as UTF-8 (e.g. the repair above was
+    denied by file permissions)."""
+    try:
+        load_dotenv(path, **kwargs)
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            f"{path} cannot be read as UTF-8 ({exc}). Open it in VS Code or "
+            f"Notepad++, remove the offending character (near the position "
+            f"shown above), and save the file with UTF-8 encoding."
+        ) from exc
+
+
+_repair_env_files()
 if _ENV_FILE.exists():
-    load_dotenv(_ENV_FILE, override=False)
+    _load_env(_ENV_FILE, override=False)
 else:
-    load_dotenv()  # fallback: plain load from CWD (e.g. server setups)
+    # Fallback: first .env walking up from THIS folder (e.g. server setups
+    # that keep one shared file in the project root).
+    _found_env = find_dotenv()
+    if _found_env:
+        _load_env(Path(_found_env))
 
 # --- PROJECT DIRECTORIES ---
 BASE_DIR = Path(__file__).resolve().parent
